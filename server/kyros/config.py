@@ -46,14 +46,8 @@ class Settings(BaseSettings):
     admin_token: str = Field(default="", description="Master admin token for provisioning")
 
     # ── Embeddings ───────────────────────────────────────────────────────
-    embedding_model: str = Field(default="all-MiniLM-L12-v2")
-    embedding_dimension: int = Field(default=384, ge=1)
-    # Optional secondary embedding model for cross-model portability (F01/F02).
-    # When set, every memory write also populates embedding_secondary.
-    # Example: KYROS_SECONDARY_EMBEDDING_MODEL=text-embedding-3-small
-    secondary_embedding_model: str = Field(
-        default="", description="Optional second embedding model name"
-    )
+    embedding_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5")
+    embedding_dimension: int = Field(default=768, ge=1)
 
     # ── Stripe (optional — only required for billing) ────────────────────
     stripe_api_key: str = Field(default="")
@@ -127,6 +121,7 @@ class Settings(BaseSettings):
         if v not in allowed:
             raise ValueError(f"environment must be one of {allowed}, got {v!r}")
         return v
+
 
     @field_validator("log_level")
     @classmethod

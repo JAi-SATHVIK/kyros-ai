@@ -9,11 +9,8 @@ import string
 import time
 from datetime import datetime, timedelta
 
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -354,12 +351,12 @@ class MemoryService:
                 text("""
                 INSERT INTO episodic_memories
                     (id, agent_id, tenant_id, content, content_type, role,
-                     session_id, embedding, embedding_secondary, embedding_model,
+                     session_id, embedding, embedding_model,
                      metadata, importance, created_at, event_time,
                      content_hash, merkle_leaf, nonce, memory_category, decay_rate)
                 VALUES
                     (:id, :agent_id, :tenant_id, :content, :content_type, :role,
-                     :session_id, :embedding, :embedding_secondary, :embedding_model,
+                     :session_id, :embedding, :embedding_model,
                      :metadata, :importance, :created_at, :event_time,
                      :content_hash, :merkle_leaf, :nonce, :memory_category, :decay_rate)
                 """),
@@ -372,7 +369,6 @@ class MemoryService:
                     "role": request.role,
                     "session_id": request.session_id,
                     "embedding": embedding,
-                    "embedding_secondary": embedding_secondary,
                     "embedding_model": emb_model_name,
                     "metadata": json.dumps(request.metadata),
                     "importance": request.importance,
@@ -445,32 +441,30 @@ class MemoryService:
             )
 
         if os.environ.get("KYROS_DISABLE_BG_INTEL") != "true":
-            # D04: Asynchronously extract implicit causal relationships using LLM
-            if recent_memories and (
-                os.environ.get("OPENAI_API_KEY")
-                or os.environ.get("GEMINI_API_KEY")
-                or os.environ.get("ANTHROPIC_API_KEY")
-                or os.environ.get("MISTRAL_API_KEY")
-            ):
+            from kyros.intelligence.classifier import is_factual_content
+            
+            is_factual = is_factual_content(request.content)
+            
+            if is_factual:
+                from kyros.intelligence.batch_resolver import enqueue_and_resolve_batch
                 self._run_task(
-                    extract_and_store_causal_edges(
-                        tenant_id_required, agent_id, memory_id, request.content, recent_memories
+                    enqueue_and_resolve_batch(
+                        self.cache.redis,
+                        tenant_id_required,
+                        agent_id,
+                        memory_id,
+                        request.content,
+                        request.role,
+                        recent_memories
                     ),
-                    "extract_causal",
-                    details=f"Extracting implicit causes for: {request.content[:40]}..."
+                    "resolve_entities",
+                    details=f"Batch queueing and processing for: {request.content[:40]}..."
                 )
-
-            # Step 1: Asynchronously resolve and update entities from content
-            # Include speaker context so entity resolver can attribute facts to the correct person
-            from kyros.intelligence.entity_resolver import resolve_and_update_entities
-            speaker_name = request.role if request.role else "unknown"
-            # For benchmark datasets (e.g. LoCoMo), the agent display_name carries the speaker identity
-            content_with_speaker = f"[Speaker: {speaker_name}] {request.content}"
-            self._run_task(
-                resolve_and_update_entities(agent_id, content_with_speaker),
-                "resolve_entities",
-                details=f"Resolving entities from: {request.content[:40]}..."
-            )
+            else:
+                logger.info(
+                    "Skipping entity extraction/causal mapping for non-factual conversational turn",
+                    content=request.content[:50]
+                )
 
             # Step 6: Asynchronously check and compress session turns if needed
             if request.session_id:
@@ -544,6 +538,7 @@ class MemoryService:
                     )
                     for r in res.fetchall():
                         meta = json.loads(r.metadata) if isinstance(r.metadata, str) else (r.metadata or {})
+                        meta = {**meta, "subject": r.subject, "predicate": r.predicate, "object": r.object}
                         results.append(MemoryResult(
                             memory_id=r.id,
                             content=f"{r.subject} {r.predicate} {r.object}",
@@ -587,8 +582,9 @@ class MemoryService:
         # Fallback dummy QueryContext for builds where classifier is absent
         class QueryContext:
             def __init__(self, query: str = "", ref_time: datetime | None = None):
-                self.entities = []
-                self.temporal_info = {}
+                self.entities: list[str] = []
+                self.temporal_info: dict[str, Any] = {}
+                self.intent: str = "general"
 
                 # 1. Advanced Entity Extraction: Proper nouns, quoted strings, and common name patterns
                 # Matches "Caroline", "Melanie", "LGBTQ group", "Oliver", "Luna"
@@ -715,10 +711,10 @@ class MemoryService:
             # Phase 3: Strict Deterministic Mode
             if getattr(request, "strict", False):
                 # Bypass probabilistic vector/BM25 search entirely
-                rows = []
+                rows: list[Any] = []
             else:
                 # Stage 1: Get fast candidate IDs from lightweight index-only queries
-                candidate_ids = []
+                candidate_ids: list[Any] = []
 
                 # Iterate over all expanded queries (query expansion)
                 for q_idx, q_text in enumerate(expanded_queries):
@@ -845,7 +841,7 @@ class MemoryService:
                     # Stage 2: Fetch metadata and perform exact Postgres calculations for ONLY the matched candidate IDs
                     stage2_query = f"""
                         SELECT e.id, e.content, e.importance, e.created_at, e.metadata, e.freshness_score, 'episodic' as memory_type, e.event_time, e.role,
-                               a.display_name as agent_name,
+                               a.display_name as agent_name, e.memory_category as memory_category,
                                1 - (e.embedding <=> :query_vec) AS similarity,
                                ts_rank_cd(to_tsvector('english', e.content || ' ' || COALESCE(e.role, '')), {stage2_tsquery_expr}) AS bm25_score
                         FROM episodic_memories e
@@ -853,7 +849,7 @@ class MemoryService:
                         WHERE e.id = ANY(:matched_ids) AND (e.deleted_at IS NULL OR (e.metadata->>'archived_by_summarizer')::boolean = true)
                         UNION ALL
                         SELECT s.id, (s.subject || ' ' || s.predicate || ': ' || s.object) as content, s.confidence as importance, s.created_at, s.metadata, s.freshness_score, 'semantic' as memory_type, s.event_time, 'assistant' as role,
-                               a.display_name as agent_name,
+                               a.display_name as agent_name, 'fact' as memory_category,
                                1 - (s.embedding <=> :query_vec) AS similarity,
                                ts_rank_cd(to_tsvector('english', s.subject || ' ' || s.predicate || ': ' || s.object), {stage2_tsquery_expr}) AS bm25_score
                         FROM semantic_memories s
@@ -861,7 +857,7 @@ class MemoryService:
                         WHERE s.id = ANY(:matched_ids) AND s.valid_to IS NULL AND s.deleted_at IS NULL
                         UNION ALL
                         SELECT p.id, (p.name || ': ' || p.description) as content, 0.8 as importance, p.created_at, p.metadata, p.freshness_score, 'procedural' as memory_type, p.event_time, 'assistant' as role,
-                               a.display_name as agent_name,
+                               a.display_name as agent_name, 'workflow' as memory_category,
                                1 - (p.embedding <=> :query_vec) AS similarity,
                                ts_rank_cd(to_tsvector('english', p.name || ': ' || p.description), {stage2_tsquery_expr}) AS bm25_score
                         FROM procedural_memories p
@@ -968,6 +964,7 @@ class MemoryService:
                                 self.metadata = original_row.metadata
                                 self.freshness_score = original_row.freshness_score
                                 self.memory_type = original_row.memory_type
+                                self.memory_category = getattr(original_row, "memory_category", original_row.memory_type)
                                 self.event_time = original_row.event_time
                                 self.similarity = sim
                                 self.bm25_score = bm25
@@ -1004,10 +1001,10 @@ class MemoryService:
                                     final_rows = [top_candidates[i] for i in selected_indices if i < len(top_candidates)]
                                     # Append the rest of the score-based rows if re-ranker didn't pick enough
                                     if len(final_rows) < request.k:
-                                        picked_ids = {r.id for r in final_rows}
-                                        for r in top_candidates:
-                                            if r.id not in picked_ids:
-                                                final_rows.append(r)
+                                        picked_ids = {cand.id for cand in final_rows}
+                                        for cand in top_candidates:
+                                            if cand.id not in picked_ids:
+                                                final_rows.append(cand)
                                                 if len(final_rows) >= request.k: break
                                     rows = final_rows[:request.k]
                                 else:
@@ -1112,6 +1109,7 @@ class MemoryService:
                         metadata={"source": "canonical_entity_state"},
                         freshness_score=1.0,
                         memory_type="semantic",
+                        memory_category="fact",
                         event_time=None,
                         similarity=1.0,
                         bm25_score=1.0,
@@ -1173,6 +1171,40 @@ class MemoryService:
             final_rows.sort(key=lambda r: r.hybrid_score, reverse=True)
             rows = final_rows
 
+            # --- ACTIVE RECALL (Spacing Effect) UPDATE ---
+            accessed_by_type: dict[str, list[Any]] = {"episodic": [], "semantic": [], "procedural": []}
+            now_time = datetime.now(UTC).replace(tzinfo=None)
+            for s_row in rows:
+                if s_row.memory_type in accessed_by_type and s_row.id:
+                    accessed_by_type[s_row.memory_type].append(s_row.id)
+                # Update in-memory representation so current query gets fresh scores
+                s_row.freshness_score = 1.0
+                if s_row.metadata is None:
+                    s_row.metadata = {}
+                s_row.metadata["access_count"] = int(s_row.metadata.get("access_count", 0)) + 1
+                s_row.metadata["last_accessed_at"] = now_time.isoformat()
+
+            for m_type, ids in accessed_by_type.items():
+                if ids:
+                    table_name = f"{m_type}_memories"
+                    try:
+                        await session.execute(
+                            text(f"""
+                            UPDATE {table_name}
+                            SET 
+                                freshness_score = 1.0,
+                                metadata = COALESCE(metadata, '{{}}'::jsonb) 
+                                           || jsonb_build_object(
+                                               'access_count', COALESCE((metadata->>'access_count')::int, 0) + 1,
+                                               'last_accessed_at', CAST(:now_str AS TEXT)
+                                           )
+                            WHERE id = ANY(:ids)
+                            """),
+                            {"now_str": now_time.isoformat(), "ids": ids}
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to update active recall metadata for accessed memories", memory_type=m_type, error=str(e))
+
 
             # Return structured results
             results = []
@@ -1181,23 +1213,23 @@ class MemoryService:
             causal_results = []
             if request.include_causal_ancestry:
                 from kyros.intelligence.causal import traverse_causal_chain
-                for row in rows:
+                for s_row in rows:
                     try:
-                        res = await traverse_causal_chain(
+                        c_res = await traverse_causal_chain(
                             agent_id=agent_id,
-                            memory_id=row.id,
+                            memory_id=s_row.id,
                             max_depth=2,
                             direction="both",
                             session=session
                         )
-                        causal_results.append(res)
+                        causal_results.append(c_res)
                     except Exception as e:
-                        logger.warning(f"Causal traversal failed for memory {row.id}: {e}")
+                        logger.warning(f"Causal traversal failed for memory {s_row.id}: {e}")
                         causal_results.append({"nodes": [], "edges": []})
             else:
                 causal_results = [{"nodes": [], "edges": []} for _ in rows]
 
-            for i, row in enumerate(rows):
+            for i, s_row in enumerate(rows):
                 causal_ancestry: list[dict] = []
 
                 # Assign causal results
@@ -1207,25 +1239,25 @@ class MemoryService:
                         causal_ancestry = graph_res["edges"]
 
                 # Removed Session Timeline Retrieval to prevent context contamination and bloated chunks
-                context_window = []
+                context_window: list[Any] = []
 
                 results.append(
                     MemoryResult(
-                        memory_id=row.id,
-                        content=row.content,
-                        memory_type=row.memory_type,
-                        relevance_score=round(float(row.hybrid_score), 4),
-                        importance=row.importance,
-                        created_at=row.created_at,
+                        memory_id=s_row.id,
+                        content=s_row.content,
+                        memory_type=s_row.memory_type,
+                        relevance_score=round(float(s_row.hybrid_score), 4),
+                        importance=s_row.importance,
+                        created_at=s_row.created_at,
                         metadata={
-                            **(row.metadata or {}),
+                            **(s_row.metadata or {}),
                             "session_context": context_window,
                             "graph_links": causal_ancestry, # Inject Graph relationships
-                            "event_time": row.event_time, # Forward absolute temporal info
+                            "event_time": s_row.event_time, # Forward absolute temporal info
                         },
-                        freshness_score=round(float(row.freshness_score), 4),
-                        freshness_warning=row.freshness_score < freshness_warning_threshold,
-                        memory_category=row.memory_type,
+                        freshness_score=round(float(s_row.freshness_score), 4),
+                        freshness_warning=s_row.freshness_score < freshness_warning_threshold,
+                        memory_category=s_row.memory_category,
                         causal_ancestry=causal_ancestry,
                     )
                 )
@@ -1237,17 +1269,17 @@ class MemoryService:
 
         # Phase 7: Memory Compression
         compressed_results = []
-        for res in results:
+        for m_res in results:
             # 1. Drop highly irrelevant episodic noise that slipped through
-            if res.memory_category == "episodic" and res.importance < 0.2:
+            if m_res.memory_category == "episodic" and m_res.importance < 0.2:
                 continue
 
             # 2. Strip conversational filler words from episodic chunks
-            if not res.content.startswith("[CANONICAL FACT]"):
-                res.content = res.content.replace("This is a memory of ", "")
-                res.content = res.content.replace("The user said: ", "")
+            if not m_res.content.startswith("[CANONICAL FACT]"):
+                m_res.content = m_res.content.replace("This is a memory of ", "")
+                m_res.content = m_res.content.replace("The user said: ", "")
 
-            compressed_results.append(res)
+            compressed_results.append(m_res)
         results = compressed_results
 
         elapsed = (time.monotonic() - start) * 1000
@@ -1397,12 +1429,12 @@ class MemoryService:
                 text("""
                 INSERT INTO semantic_memories
                     (id, agent_id, tenant_id, subject, predicate, object,
-                     confidence, embedding, embedding_secondary, embedding_model,
+                     confidence, embedding, embedding_model,
                      metadata, source_type, created_at, updated_at, event_time,
                      content_hash, merkle_leaf, nonce, valid_from, valid_to, source_episodic_id)
                 VALUES
                     (:id, :agent_id, :tenant_id, :subject, :predicate, :object,
-                     :confidence, :embedding, :embedding_secondary, :embedding_model,
+                     :confidence, :embedding, :embedding_model,
                      :metadata, :source_type, :created_at, :now, :event_time,
                      :content_hash, :merkle_leaf, :nonce, :valid_from, :valid_to, :source_episodic_id)
                 """),
@@ -1415,7 +1447,6 @@ class MemoryService:
                     "object": request.object,
                     "confidence": request.confidence,
                     "embedding": embedding,
-                    "embedding_secondary": embedding_secondary,
                     "embedding_model": emb_model_name,
                     "metadata": json.dumps(getattr(request, "metadata", {})),
                     "source_type": request.source_type,
@@ -1498,6 +1529,7 @@ class MemoryService:
                 results = []
                 for row in rows:
                     meta = json.loads(row.metadata) if isinstance(row.metadata, str) else (row.metadata or {})
+                    meta = {**meta, "subject": row.subject, "predicate": row.predicate, "object": row.object}
                     results.append(MemoryResult(
                         memory_id=row.id,
                         content=f"{row.subject} {row.predicate} {row.object}",
@@ -1548,7 +1580,7 @@ class MemoryService:
                 relevance_score=round(float(row.similarity), 4),
                 importance=float(row.confidence),
                 created_at=row.created_at,
-                metadata={},
+                metadata={"subject": row.subject, "predicate": row.predicate, "object": row.object},
             )
             for row in rows
         ]
@@ -1581,12 +1613,12 @@ class MemoryService:
                 text("""
                 INSERT INTO procedural_memories
                     (id, agent_id, tenant_id, name, description, task_type,
-                     steps, embedding, embedding_secondary, embedding_model,
+                     steps, embedding, embedding_model,
                      metadata, created_at, updated_at, event_time,
                      content_hash, merkle_leaf, nonce)
                 VALUES
                     (:id, :agent_id, :tenant_id, :name, :description, :task_type,
-                     :steps, :embedding, :embedding_secondary, :embedding_model,
+                     :steps, :embedding, :embedding_model,
                      :metadata, :now, :now, :event_time,
                      :content_hash, :merkle_leaf, :nonce)
                 """),
@@ -1601,7 +1633,6 @@ class MemoryService:
                         [s.model_dump() if hasattr(s, "model_dump") else s for s in request.steps]
                     ),
                     "embedding": embedding,
-                    "embedding_secondary": embedding_secondary,
                     "embedding_model": emb_model_name,
                     "metadata": json.dumps(request.metadata),
                     "now": now,
@@ -2073,7 +2104,7 @@ class MemoryService:
 
         deduplicated = []
         # Store tuples of (raw_content_string, word_set) to avoid redundant tokenization in Jaccard loops
-        seen_entries = []
+        seen_entries: list[Any] = []
 
         for row in rows:
             content = str(row.content).strip().lower()

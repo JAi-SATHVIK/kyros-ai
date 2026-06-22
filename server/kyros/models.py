@@ -22,6 +22,14 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
 
+# Load configured embedding dimension dynamically with a fallback
+try:
+    from kyros.config import Settings
+    embedding_dim = Settings().embedding_dimension
+except Exception:
+    embedding_dim = 768
+
+
 
 class Base(DeclarativeBase):
     """Base class for all Kyros ORM models."""
@@ -102,10 +110,8 @@ class EpisodicMemory(Base):
     content_type = Column(String(50), nullable=False, default="text")
     role = Column(String(50), nullable=True)
     session_id = Column(String(255), nullable=True)
-    embedding = Column(Vector(384), nullable=False)
+    embedding = Column(Vector(embedding_dim), nullable=False)
 
-    # F01, F02: Dual Embeddings for Portability
-    embedding_secondary = Column(Vector(1536), nullable=True)
     embedding_model = Column(String(100), nullable=False, default="all-MiniLM-L12-v2")
 
     metadata_ = Column("metadata", JSONB, nullable=False, default=dict)
@@ -154,10 +160,9 @@ class SemanticMemory(Base):
     predicate = Column(String(500), nullable=False)
     object = Column(Text, nullable=False)
     confidence = Column(Float, nullable=False, default=1.0)
-    embedding = Column(Vector(384), nullable=False)
+    embedding = Column(Vector(embedding_dim), nullable=False)
 
     # F01, F02: Dual Embeddings for Portability
-    embedding_secondary = Column(Vector(1536), nullable=True)
     embedding_model = Column(String(100), nullable=False, default="all-MiniLM-L12-v2")
 
     metadata_ = Column("metadata", JSONB, nullable=False, default=dict)
@@ -213,10 +218,9 @@ class ProceduralMemory(Base):
     description = Column(Text, nullable=False)
     task_type = Column(String(255), nullable=False)
     steps = Column(JSONB, nullable=False)
-    embedding = Column(Vector(384), nullable=False)
+    embedding = Column(Vector(embedding_dim), nullable=False)
 
     # F01, F02: Dual Embeddings for Portability
-    embedding_secondary = Column(Vector(1536), nullable=True)
     embedding_model = Column(String(100), nullable=False, default="all-MiniLM-L12-v2")
 
     success_count = Column(Integer, nullable=False, default=0)

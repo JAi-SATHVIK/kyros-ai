@@ -62,27 +62,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Starting Kyros", environment=settings.environment, version="0.1.0")
 
     try:
-        # Ensure we never load the deprecated L6 model
-        model_name = settings.embedding_model
-        if model_name.lower().startswith("all-minilm-l6"):
-            logger.warning(
-                "Embedding model set to L6; overriding to L12 for compatibility",
-                original=model_name,
-            )
-            model_name = "all-MiniLM-L12-v2"
         app.state.embedder = EmbeddingModel(
-            model_name,
-            secondary_model_name=settings.secondary_embedding_model,
+            settings.embedding_model,
+            secondary_model_name="",
         )
         logger.info(
             "Embedding model loaded",
             model=settings.embedding_model,
             dim=app.state.embedder.dimension,
-            secondary=settings.secondary_embedding_model or "none",
         )
     except EmbeddingError as e:
         logger.error("Failed to load embedding model — server cannot start", error=str(e))
         raise
+
+    # Preload Cross-Encoder reranker in background to avoid cold-start latency on first recall
+    try:
+        from kyros.ml.reranker import get_reranker
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, get_reranker)
+        logger.info("Cross-Encoder reranker background warming scheduled")
+    except Exception as e:
+        logger.warning("Failed to schedule Cross-Encoder reranker warming", error=str(e))
 
     try:
         app.state.redis = await get_redis(settings.redis_url)
@@ -254,6 +254,8 @@ os.makedirs(dashboard_dir, exist_ok=True)
 @app.get("/dashboard", response_class=HTMLResponse)
 @app.get("/dashboard/", response_class=HTMLResponse)
 @app.get("/dashboard/index.html", response_class=HTMLResponse)
+@app.get("/developers", response_class=HTMLResponse)
+@app.get("/developers/", response_class=HTMLResponse)
 async def serve_dashboard():
     """Serve dashboard with no-cache headers so edits are always visible."""
     html_path = os.path.join(dashboard_dir, "index.html")
@@ -266,6 +268,21 @@ async def serve_dashboard():
             "Pragma": "no-cache",
         },
     )
+
+
+from fastapi.responses import FileResponse
+
+
+@app.get("/dashboard/logo.png")
+@app.get("/logo.png")
+async def serve_logo():
+    return FileResponse(os.path.join(dashboard_dir, "logo.png"))
+
+
+@app.get("/dashboard/favicon.ico")
+@app.get("/favicon.ico")
+async def serve_favicon():
+    return FileResponse(os.path.join(dashboard_dir, "favicon.ico"))
 
 
 # ─── Health Checks ─────────────────────────────

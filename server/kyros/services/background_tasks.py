@@ -1,10 +1,7 @@
 import asyncio
 from datetime import datetime
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 from typing import Any
 
 # Global sets and lists for tracking tasks
