@@ -9,11 +9,8 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -444,7 +441,7 @@ async def analyze_causal_frequencies(
         frequencies = json.loads(cleaned)
     except Exception as e:
         logger.error("Failed to analyze causal frequencies via LLM, falling back to local Python grouping", error=str(e))
-        counts = {}
+        counts: dict[str, int] = {}
         for c in all_causes:
             summary = c[:60] + "..." if len(c) > 60 else c
             counts[summary] = counts.get(summary, 0) + 1

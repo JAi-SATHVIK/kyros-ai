@@ -12,11 +12,8 @@ from __future__ import annotations
 
 import random
 from datetime import datetime
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 
 from kyros.intelligence.compression import BATCH_SIZE_L1, CompressionEngine
 from kyros.logging import get_logger

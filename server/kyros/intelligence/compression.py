@@ -17,11 +17,8 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 
 from kyros.logging import get_logger
 

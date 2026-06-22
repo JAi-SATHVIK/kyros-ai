@@ -12,11 +12,8 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timedelta
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 from uuid import UUID
 
 from sqlalchemy import text

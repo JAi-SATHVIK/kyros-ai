@@ -22,11 +22,8 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 
 # ─── B04: Decay Rate Lookup Table ─────────────
 
@@ -102,17 +99,19 @@ def calculate_freshness(
     decay_rate: float,
     base_confidence: float = 1.0,
     now: datetime | None = None,
+    metadata: dict | None = None,
 ) -> float:
     """Calculate the current freshness score for a memory.
 
-    Implements Ebbinghaus's forgetting curve:
-        freshness = base_confidence × e^(-age_days × decay_rate)
+    Implements Ebbinghaus's forgetting curve with Spacing Effect (Active Recall):
+        freshness = base_confidence × e^(-age_days × effective_decay_rate)
 
     Args:
         created_at: When the memory was originally stored.
         decay_rate: The decay rate for this memory's category.
         base_confidence: Initial freshness value (default 1.0).
         now: Current timestamp (defaults to utcnow).
+        metadata: Optional dictionary containing access_count and last_accessed_at.
 
     Returns:
         Freshness score between 0.0 (completely stale) and 1.0 (fully fresh).
@@ -120,16 +119,34 @@ def calculate_freshness(
     if now is None:
         now = datetime.now(UTC).replace(tzinfo=None)
 
-    # Ensure both are naive or both are aware
-    if created_at.tzinfo is not None and now.tzinfo is None:
-        now = now.replace(tzinfo=UTC)
-    elif created_at.tzinfo is None and now.tzinfo is not None:
-        created_at = created_at.replace(tzinfo=UTC)
+    # 1. Parse active recall metadata (Spacing Effect / Active Access)
+    effective_created_at = created_at
+    effective_decay_rate = decay_rate
+    
+    if metadata and isinstance(metadata, dict):
+        # Spacing effect: Every access reduces future decay rate by 15% (capping improvement)
+        access_count = int(metadata.get("access_count", 0))
+        if access_count > 0:
+            effective_decay_rate = decay_rate * (0.85 ** access_count)
+            
+        # Resets the forgetting curve origin to the last accessed time
+        last_accessed_str = metadata.get("last_accessed_at")
+        if last_accessed_str:
+            try:
+                effective_created_at = datetime.fromisoformat(last_accessed_str)
+            except Exception:
+                pass
 
-    age_seconds = max(0, (now - created_at).total_seconds())
+    # Ensure both are naive or both are aware
+    if effective_created_at.tzinfo is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    elif effective_created_at.tzinfo is None and now.tzinfo is not None:
+        effective_created_at = effective_created_at.replace(tzinfo=UTC)
+
+    age_seconds = max(0, (now - effective_created_at).total_seconds())
     age_days = age_seconds / 86400.0
 
-    freshness = base_confidence * math.exp(-age_days * decay_rate)
+    freshness = base_confidence * math.exp(-age_days * effective_decay_rate)
 
     # Clamp to [0.0, 1.0]
     return max(0.0, min(1.0, freshness))
@@ -153,6 +170,7 @@ def evaluate_freshness(
     config: DecayConfig | None = None,
     base_confidence: float = 1.0,
     now: datetime | None = None,
+    metadata: dict | None = None,
 ) -> FreshnessResult:
     """Full freshness evaluation with status classification.
 
@@ -162,6 +180,7 @@ def evaluate_freshness(
         config: Tenant-specific decay configuration.
         base_confidence: Initial confidence/freshness value.
         now: Current time (defaults to utcnow).
+        metadata: Optional dictionary containing access_count and last_accessed_at.
 
     Returns:
         FreshnessResult with score, age, status, and thresholds.
@@ -173,16 +192,32 @@ def evaluate_freshness(
         now = datetime.now(UTC).replace(tzinfo=None)
 
     decay_rate = config.get_rate(category)
-    freshness = calculate_freshness(created_at, decay_rate, base_confidence, now)
-    half_life = config.get_half_life_days(category)
+    
+    # Calculate effective decay rate for reporting half-life accurately
+    effective_decay_rate = decay_rate
+    if metadata and isinstance(metadata, dict):
+        access_count = int(metadata.get("access_count", 0))
+        if access_count > 0:
+            effective_decay_rate = decay_rate * (0.85 ** access_count)
+
+    freshness = calculate_freshness(created_at, decay_rate, base_confidence, now, metadata)
+
+    if metadata and isinstance(metadata, dict) and metadata.get("last_accessed_at"):
+        try:
+            effective_created_at = datetime.fromisoformat(metadata["last_accessed_at"])
+        except Exception:
+            effective_created_at = created_at
+    else:
+        effective_created_at = created_at
 
     # Ensure timezone handling
-    if created_at.tzinfo is not None and now.tzinfo is None:
+    if effective_created_at.tzinfo is not None and now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
-    elif created_at.tzinfo is None and now.tzinfo is not None:
-        created_at = created_at.replace(tzinfo=UTC)
+    elif effective_created_at.tzinfo is None and now.tzinfo is not None:
+        effective_created_at = effective_created_at.replace(tzinfo=UTC)
 
-    age_days = max(0, (now - created_at).total_seconds()) / 86400.0
+    age_days = max(0, (now - effective_created_at).total_seconds()) / 86400.0
+    half_life = math.log(2) / effective_decay_rate if effective_decay_rate > 0 else float("inf")
 
     # Classify status
     if freshness >= config.freshness_warning_threshold:
@@ -197,8 +232,8 @@ def evaluate_freshness(
     return FreshnessResult(
         freshness_score=round(freshness, 6),
         age_days=round(age_days, 2),
-        decay_rate=decay_rate,
-        half_life_days=round(half_life, 2),
+        decay_rate=effective_decay_rate,
+        half_life_days=round(half_life, 2) if half_life != float("inf") else 99999.0,
         status=status,
         category=category,
     )

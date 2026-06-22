@@ -15,11 +15,8 @@ from __future__ import annotations
 import math
 from datetime import datetime
 
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 from typing import Any
 from uuid import UUID
 
@@ -123,13 +120,17 @@ async def update_all_freshness_scores(
                 params["tid"] = tenant_id
 
             # Atomic UPDATE: compute new freshness in SQL to avoid race conditions.
+            # Accounts for Spacing Effect (access_count reduces decay_rate) and Active Recall (resets time to last_accessed_at).
             # Only update rows where the score has changed by more than 0.001.
             await session.execute(
                 text(f"""
                 UPDATE {table}
                 SET freshness_score = GREATEST(
                     0.0,
-                    LEAST(1.0, EXP(-decay_rate * EXTRACT(EPOCH FROM (:now - created_at)) / 86400.0))
+                    LEAST(1.0, EXP(
+                        - (decay_rate * POWER(0.85, COALESCE((metadata->>'access_count')::int, 0)))
+                        * (EXTRACT(EPOCH FROM (:now - COALESCE((metadata->>'last_accessed_at')::timestamp, created_at))) / 86400.0)
+                    ))
                 )
                 WHERE deleted_at IS NULL
                   {tenant_filter}
@@ -138,7 +139,10 @@ async def update_all_freshness_scores(
                         0.0,
                         LEAST(
                             1.0,
-                            EXP(-decay_rate * EXTRACT(EPOCH FROM (:now - created_at)) / 86400.0)
+                            EXP(
+                                - (decay_rate * POWER(0.85, COALESCE((metadata->>'access_count')::int, 0)))
+                                * (EXTRACT(EPOCH FROM (:now - COALESCE((metadata->>'last_accessed_at')::timestamp, created_at))) / 86400.0)
+                            )
                         )
                     )
                   ) > 0.001
@@ -149,7 +153,7 @@ async def update_all_freshness_scores(
             # Fetch updated stats for reporting (read-only, no race risk)
             result = await session.execute(
                 text(f"""
-                SELECT created_at, decay_rate, memory_category, freshness_score
+                SELECT created_at, decay_rate, memory_category, freshness_score, metadata
                 FROM {table}
                 WHERE deleted_at IS NULL {tenant_filter}
                 """),
@@ -161,6 +165,7 @@ async def update_all_freshness_scores(
                     category=row.memory_category or "general",
                     config=config,
                     now=now,
+                    metadata=row.metadata,
                 )
                 stats[result_eval.status] += 1
                 stats["total"] += 1

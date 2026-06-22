@@ -9,11 +9,8 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -138,7 +135,7 @@ async def summarize_session_if_needed(
 
             # Compute a simple dummy embedding for the summary (using the first turn's embed or 0 vector fallback)
             embed_result = await session.execute(
-                text("SELECT embedding, embedding_secondary, embedding_model, tenant_id FROM episodic_memories WHERE id = :id"),
+                text("SELECT embedding, embedding_model, tenant_id FROM episodic_memories WHERE id = :id"),
                 {"id": to_compress[0].id},
             )
             orig_row = embed_result.fetchone()
@@ -155,12 +152,12 @@ async def summarize_session_if_needed(
                 text("""
                 INSERT INTO episodic_memories
                     (id, agent_id, tenant_id, content, content_type, role,
-                     session_id, embedding, embedding_secondary, embedding_model,
+                     session_id, embedding, embedding_model,
                      metadata, importance, freshness_score, decay_rate,
                      memory_category, created_at)
                 VALUES
                     (:id, :agent_id, :tenant_id, :content, 'text', 'system',
-                     :session_id, :embedding, :embedding_secondary, :embedding_model,
+                     :session_id, :embedding, :embedding_model,
                      :metadata, 0.9, 1.0, 0.01,
                      'general', :now)
                 """),
@@ -171,7 +168,6 @@ async def summarize_session_if_needed(
                     "content": f"[SESSION SUMMARY] {summary_text}",
                     "session_id": session_id,
                     "embedding": orig_row.embedding,
-                    "embedding_secondary": orig_row.embedding_secondary,
                     "embedding_model": orig_row.embedding_model,
                     "metadata": json.dumps(metadata),
                     "now": now,

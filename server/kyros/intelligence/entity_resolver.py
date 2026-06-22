@@ -8,14 +8,9 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-
-    UTC = timezone.utc
+UTC = timezone.utc
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -47,6 +42,7 @@ CRITICAL INSTRUCTIONS:
 4. RELATIONSHIP MAPPING: Map how entities interact (e.g. "Subject A reports to Subject B", "Entity C is part of Organization D").
 5. GRANULARITY: Extract minor details that define a persona or situation (e.g. specific preferences, past experiences, or unique identifiers).
 6. SPEAKER ATTRIBUTION: The text may be prefixed with [Speaker: Name]. When the speaker uses first-person pronouns (e.g., "I", "my", "me"), attribute those actions, properties, or relationships directly to the Speaker entity (e.g., "Melanie") instead of creating an entity named "I" or "Speaker".
+7. CANONICAL NAMES & ALIASES: Identify if the entity has alternative names/abbreviations/aliases mentioned in the context (e.g., "Kyros AI" alias "Kyros", "Google" alias "Google Inc.") and determine the most formal/canonical name.
 
 Input Text:
 {text}
@@ -55,16 +51,18 @@ Return ONLY a JSON list of objects. No markdown.
 
 Format:
 [
-  {{
+  {
     "name": "EntityName",
+    "canonical_name": "Canonical/Formal Name",
+    "aliases": ["Alias1", "Alias2"],
     "type": "Person|Org|Place|Concept|Object|Other",
-    "properties": {{
+    "properties": {
       "key1": "value1",
       "key2": ["list", "of", "values"],
       "temporal_context": "When this fact was true",
-      "relationships": {{"type": "TargetEntity"}}
-    }}
-  }}
+      "relationships": {"type": "TargetEntity"}
+    }
+  }
 ]
 """
 
@@ -126,6 +124,8 @@ ENTITY_JSON_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
+                    "canonical_name": {"type": "string"},
+                    "aliases": {"type": "array", "items": {"type": "string"}},
                     "type": {
                         "type": "string",
                         "enum": ["Person", "Org", "Place", "Concept", "Object", "Other"],
@@ -237,8 +237,24 @@ async def resolve_and_update_entities(
             if not name:
                 continue
 
-            properties = ent.get("properties", {})
+            properties = dict(ent.get("properties", {}))
+            if "type" in ent and "type" not in properties:
+                properties["type"] = ent["type"]
             canonical_name = ent.get("canonical_name", name).strip()
+            
+            # Setup aliases from extraction
+            aliases = ent.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            else:
+                aliases = list(aliases)
+            
+            if canonical_name and canonical_name.lower() != name.lower():
+                if canonical_name not in aliases:
+                    aliases.append(canonical_name)
+            if name and name not in aliases:
+                aliases.append(name)
+            properties["aliases"] = aliases
 
             try:
                 # 1. Look up existing entity case-insensitively
@@ -262,6 +278,23 @@ async def resolve_and_update_entities(
                     # Merge logic (recursive/deep merge)
                     merged_state = merge_properties(existing_state, properties)
 
+                    # Merge aliases cleanly
+                    existing_aliases = merged_state.get("aliases") or merged_state.get("alias") or []
+                    if isinstance(existing_aliases, str):
+                        existing_aliases = [existing_aliases]
+                    else:
+                        existing_aliases = list(existing_aliases)
+                    
+                    for a in aliases:
+                        if a.lower() not in [ea.lower() for ea in existing_aliases]:
+                            existing_aliases.append(a)
+                    if name.lower() != row.name.lower() and name.lower() not in [ea.lower() for ea in existing_aliases]:
+                        existing_aliases.append(name)
+                    if canonical_name.lower() != row.name.lower() and canonical_name.lower() not in [ea.lower() for ea in existing_aliases]:
+                        existing_aliases.append(canonical_name)
+                    
+                    merged_state["aliases"] = existing_aliases
+
                     await session.execute(
                         text("""
                         UPDATE entities
@@ -271,7 +304,7 @@ async def resolve_and_update_entities(
                         {
                             "id": entity_id,
                             "state": json.dumps(merged_state),
-                            "canonical_name": canonical_name,
+                            "canonical_name": row.canonical_name or row.name, # Keep existing canonical name
                             "now": now,
                         },
                     )
@@ -361,6 +394,23 @@ async def resolve_and_update_entities(
                             existing_state = dict(row.state or {})
                             merged_state = merge_properties(existing_state, properties)
 
+                            # Merge aliases cleanly
+                            existing_aliases = merged_state.get("aliases") or merged_state.get("alias") or []
+                            if isinstance(existing_aliases, str):
+                                existing_aliases = [existing_aliases]
+                            else:
+                                existing_aliases = list(existing_aliases)
+                            
+                            for a in aliases:
+                                if a.lower() not in [ea.lower() for ea in existing_aliases]:
+                                    existing_aliases.append(a)
+                            if name.lower() != row.name.lower() and name.lower() not in [ea.lower() for ea in existing_aliases]:
+                                existing_aliases.append(name)
+                            if canonical_name.lower() != row.name.lower() and canonical_name.lower() not in [ea.lower() for ea in existing_aliases]:
+                                existing_aliases.append(canonical_name)
+                            
+                            merged_state["aliases"] = existing_aliases
+
                             await session.execute(
                                 text("""
                                 UPDATE entities
@@ -370,7 +420,7 @@ async def resolve_and_update_entities(
                                 {
                                     "id": existing_entity_id,
                                     "state": json.dumps(merged_state),
-                                    "canonical_name": canonical_name,
+                                    "canonical_name": row.canonical_name or row.name, # Keep existing canonical name
                                     "now": now,
                                 },
                             )

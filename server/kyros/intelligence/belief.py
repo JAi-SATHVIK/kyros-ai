@@ -9,11 +9,8 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
-try:
-    from datetime import UTC
-except ImportError:
-    from datetime import timezone
-    UTC = timezone.utc
+from datetime import timezone
+UTC = timezone.utc
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
