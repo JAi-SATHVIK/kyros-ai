@@ -82,7 +82,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         # Skip auth for public endpoints, docs, and the dashboard
-        if path in PUBLIC_PATHS or path.startswith(("/docs/", "/redoc/", "/dashboard")):
+        if path in PUBLIC_PATHS or path.startswith(("/docs/", "/redoc/", "/dashboard", "/favicon.ico", "/logo.png")):
             return await call_next(request)
 
         # ── Extract key ──────────────────────────────────────────────────
