@@ -1,4 +1,4 @@
-"""Cross-Encoder Reranking Engine (BAAI/bge-reranker-base).
+"""Cross-Encoder Reranking Engine (Alibaba-NLP/gte-reranker-modernbert-base).
 
 Provides extreme accuracy improvement (+10-15%) by computing deep attention scores
 between the user query and candidate memories. Automatically falls back gracefully.
@@ -17,7 +17,11 @@ logger = get_logger("kyros.ml.reranker")
 class CrossEncoderReranker:
     """Manages the Cross-Encoder model lifecycle and reranks recall candidates."""
 
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2") -> None:
+    def __init__(self, model_name: str = "Alibaba-NLP/gte-reranker-modernbert-base") -> None:
+        if model_name != "Alibaba-NLP/gte-reranker-modernbert-base":
+            raise ValueError(
+                f"Strict enforcement check failed: Reranker model must be 'Alibaba-NLP/gte-reranker-modernbert-base', got '{model_name}'"
+            )
         self.model = None
         self.model_name = model_name
         self.enabled = False

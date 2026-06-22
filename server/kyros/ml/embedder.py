@@ -9,7 +9,7 @@ logger = get_logger("kyros.ml.embedder")
 try:
     from sentence_transformers import SentenceTransformer
 except ImportError:
-    SentenceTransformer = None
+    SentenceTransformer = None  # type: ignore[assignment, misc]
 
 
 class EmbeddingError(Exception):
@@ -26,7 +26,7 @@ class EmbeddingModel:
 
     def __init__(
         self,
-        model_name: str = "all-MiniLM-L12-v2",
+        model_name: str = "nomic-ai/nomic-embed-text-v1.5",
         secondary_model_name: str = "",
     ) -> None:
         self._model_cache = {}
@@ -47,29 +47,10 @@ class EmbeddingModel:
         except Exception as e:
             raise EmbeddingError(f"Failed to load embedding model '{model_name}': {e}") from e
 
-        # Secondary model — optional, loaded only when configured
+        # Secondary model disabled in single-model architecture
         self.secondary_model = None
         self.secondary_model_name = ""
         self.secondary_dimension = 0
-
-        if secondary_model_name:
-            try:
-                self.secondary_model = SentenceTransformer(secondary_model_name)
-                self.secondary_model_name = secondary_model_name
-                self.secondary_dimension = self.secondary_model.get_embedding_dimension()
-                self._model_cache[secondary_model_name] = self.secondary_model
-                logger.info(
-                    "Secondary embedding model loaded",
-                    model=secondary_model_name,
-                    dimension=self.secondary_dimension,
-                )
-            except Exception as e:
-                # Secondary model failure is non-fatal — log and continue without it
-                logger.warning(
-                    "Failed to load secondary embedding model — secondary embeddings disabled",
-                    model=secondary_model_name,
-                    error=str(e),
-                )
 
     def embed(self, text: str, model_name: str | None = None) -> list[float]:
         """Embed a single text string. Returns a normalized vector.
@@ -134,31 +115,12 @@ class EmbeddingModel:
             raise EmbeddingError(f"Embedding failed: {e}") from e
 
     def embed_with_secondary(self, text: str, model_name: str | None = None) -> tuple[list[float], list[float] | None]:
-        """Embed text with both primary and secondary models.
-
-        Returns:
-            (primary_vector, secondary_vector) — secondary is None if no secondary model loaded.
-            primary_vector is truncated to 384 dimensions for schema compatibility.
-        """
+        """Embed text. Returns (primary_vector, None) for single-model architecture."""
         primary = self.embed(text, model_name=model_name)
-        
-        # If the resulting embedding has 1536 dimensions (e.g. OpenAI),
-        # return the first 384 elements for the primary embedding column
-        # and store the full 1536-dimensional vector in the secondary column.
-        if len(primary) == 1536:
-            return primary[:384], primary
-
-        if self.secondary_model is None:
-            return primary, None
-
-        try:
-            if len(text) > 8192:
-                text = text[:8192]
-            secondary = self.secondary_model.encode(text, normalize_embeddings=True).tolist()
-            return primary, secondary
-        except Exception as e:
-            logger.warning("Secondary embedding failed — storing NULL", error=str(e))
-            return primary, None
+        target_dim = self.dimension
+        if len(primary) > target_dim:
+            return primary[:target_dim], None
+        return primary, None
 
     def embed_batch(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
         """Embed a batch of texts with the primary model."""
