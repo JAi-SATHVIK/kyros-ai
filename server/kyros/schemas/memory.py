@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-try:
-    from enum import StrEnum
-except ImportError:
-    from enum import Enum
-    class StrEnum(str, Enum):
-        pass
+from enum import Enum
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -16,13 +11,13 @@ from pydantic import BaseModel, Field, field_validator
 # ─── Enums ─────────────────────────────────────
 
 
-class MemoryType(StrEnum):
+class MemoryType(str, Enum):
     EPISODIC = "episodic"
     SEMANTIC = "semantic"
     PROCEDURAL = "procedural"
 
 
-class ContentType(StrEnum):
+class ContentType(str, Enum):
     TEXT = "text"
     ACTION = "action"
     TOOL_CALL = "tool_call"
