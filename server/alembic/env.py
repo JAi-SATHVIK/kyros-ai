@@ -6,19 +6,24 @@ import asyncio
 import sys
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
+
+from alembic import context
 
 # Import all models so Alembic can detect schema changes
 from kyros.models import Base  # noqa: F401 — registers all ORM models
 
 try:
     from kyros.config import get_settings
+
     _db_url = get_settings().database_url
 except Exception as e:
     print(f"[alembic] ERROR: Could not load settings: {e}", file=sys.stderr)
-    print("[alembic] Ensure KYROS_DATABASE_URL is set in your environment or .env file.", file=sys.stderr)
+    print(
+        "[alembic] Ensure KYROS_DATABASE_URL is set in your environment or .env file.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 config = context.config

@@ -1,11 +1,12 @@
 # ─── Base image ───────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS base
+FROM python:3.14-slim AS base
 
 # Security: run as non-root
+WORKDIR /app
 RUN groupadd --gid 1001 kyros \
  && useradd --uid 1001 --gid kyros --shell /bin/bash --create-home kyros
 
-WORKDIR /app
+ENV KYROS_EMBEDDING_MODEL=all-MiniLM-L12-v2
 
 # System dependencies for asyncpg and pgvector
 RUN apt-get update \

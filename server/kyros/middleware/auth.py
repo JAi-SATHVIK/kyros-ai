@@ -17,7 +17,9 @@ Security notes:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import hmac
 import json
 
 from fastapi import status
@@ -42,18 +44,22 @@ _MIN_KEY_SUFFIX_LEN = 16
 _AUTH_CACHE_TTL = settings.auth_cache_ttl
 
 # Endpoints that bypass authentication entirely
-PUBLIC_PATHS = frozenset({
-    "/health",
-    "/health/ready",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
-})
+PUBLIC_PATHS = frozenset(
+    {
+        "/health",
+        "/health/ready",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/v1/admin/tenants",
+        "/v1/admin/public/sandbox/keys",
+    }
+)
 
 
 def hash_api_key(api_key: str) -> str:
     """Hash an API key with SHA-256. Keys are never stored in plaintext."""
-    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    return hmac.new(b"kyros-api-key-pepper", api_key.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _safe_key_prefix(api_key: str) -> str:
@@ -72,13 +78,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
     Cache miss falls through to DB and populates the cache.
     """
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
 
-        # Skip auth for public endpoints and doc sub-paths
-        if path in PUBLIC_PATHS or path.startswith(("/docs/", "/redoc/")):
+        # Skip auth for public endpoints, docs, and the dashboard
+        if path in PUBLIC_PATHS or path.startswith(("/docs/", "/redoc/", "/dashboard")):
             return await call_next(request)
 
         # ── Extract key ──────────────────────────────────────────────────
@@ -100,7 +104,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
 
         prefix = "mk_live_" if api_key.startswith("mk_live_") else "mk_test_"
-        suffix = api_key[len(prefix):]
+        suffix = api_key[len(prefix) :]
         if len(suffix) < _MIN_KEY_SUFFIX_LEN:
             return self._error(
                 status.HTTP_401_UNAUTHORIZED,
@@ -156,10 +160,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         try:
             async with get_db_session() as session:
                 result = await session.execute(
-                    text(
-                        "SELECT id, plan, is_active FROM tenants "
-                        "WHERE api_key_hash = :key_hash"
-                    ),
+                    text("SELECT id, plan, is_active FROM tenants WHERE api_key_hash = :key_hash"),
                     {"key_hash": key_hash},
                 )
                 tenant = result.fetchone()
@@ -181,10 +182,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
             # Cache negative result to prevent DB hammering on invalid keys
             if redis is not None:
-                try:
+                with contextlib.suppress(Exception):
                     await redis.set(_cache_key(key_hash), "null", ex=60)
-                except Exception:
-                    pass
             return self._error(
                 status.HTTP_401_UNAUTHORIZED,
                 "invalid_api_key",
@@ -209,11 +208,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
             try:
                 await redis.set(
                     _cache_key(key_hash),
-                    json.dumps({
-                        "id": str(tenant.id),
-                        "plan": tenant.plan,
-                        "is_active": tenant.is_active,
-                    }),
+                    json.dumps(
+                        {
+                            "id": str(tenant.id),
+                            "plan": tenant.plan,
+                            "is_active": tenant.is_active,
+                        }
+                    ),
                     ex=_AUTH_CACHE_TTL,
                 )
             except Exception:

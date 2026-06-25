@@ -13,17 +13,24 @@ B13: Re-verification workflow (flag stale, require confirmation)
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime
+
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
 from typing import Any
 from uuid import UUID
+
+from sqlalchemy import text
 
 from kyros.intelligence.decay import (
     DecayConfig,
     evaluate_freshness,
 )
-from kyros.storage.postgres import get_db_session
-from sqlalchemy import text
 from kyros.logging import get_logger
+from kyros.storage.postgres import get_db_session
 
 logger = get_logger("kyros.decay.service")
 
@@ -37,16 +44,17 @@ _CATEGORY_PATTERNS: list[tuple[list[str], str]] = [
     (["stock", "market", "trade", "exchange", "forex", "index"], "market_data"),
     (["email", "phone", "address", "name is", "born", "age"], "user_identity"),
     (["prefer", "like", "want", "love", "hate", "favorite", "colour", "color"], "user_preference"),
-    (["company", "org", "team", "manager", "report", "department", "ceo", "cto"], "company_structure"),
+    (
+        ["company", "org", "team", "manager", "report", "department", "ceo", "cto"],
+        "company_structure",
+    ),
     (["regulation", "law", "compliance", "gdpr", "hipaa", "soc2", "legal"], "regulatory_rule"),
     (["api", "endpoint", "sdk", "library", "version", "deprecated"], "technical_spec"),
-
     # Procedural categories
     (["step", "first", "then", "next", "finally", "how to", "install", "deploy"], "workflow"),
     (["run", "execute", "command", "curl", "docker", "build"], "deployment"),
     (["error", "bug", "fix", "debug", "traceback", "exception"], "troubleshooting"),
     (["api call", "request", "response", "http", "post", "get"], "api_usage"),
-
     # Episodic categories
     (["meeting", "standup", "sync", "retro", "review"], "meeting"),
     (["decided", "agreed", "voted", "approved", "rejected"], "decision"),
@@ -86,6 +94,7 @@ def auto_categorise(content: str, default: str = "general") -> str:
 
 # ─── B07: Background Freshness Updater ─────────
 
+
 async def update_all_freshness_scores(
     tenant_id: UUID | None = None,
     config: DecayConfig | None = None,
@@ -101,7 +110,7 @@ async def update_all_freshness_scores(
     if config is None:
         config = DecayConfig()
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
     stats = {"fresh": 0, "warning": 0, "critical": 0, "stale": 0, "total": 0}
 
     tables = ["episodic_memories", "semantic_memories", "procedural_memories"]
@@ -127,7 +136,10 @@ async def update_all_freshness_scores(
                   AND ABS(
                     freshness_score - GREATEST(
                         0.0,
-                        LEAST(1.0, EXP(-decay_rate * EXTRACT(EPOCH FROM (:now - created_at)) / 86400.0))
+                        LEAST(
+                            1.0,
+                            EXP(-decay_rate * EXTRACT(EPOCH FROM (:now - created_at)) / 86400.0)
+                        )
                     )
                   ) > 0.001
                 """),
@@ -167,6 +179,7 @@ async def update_all_freshness_scores(
 
 # ─── B10: Stale Memory Detection ──────────────
 
+
 async def get_stale_memories(
     agent_id: UUID,
     threshold: float = 0.40,
@@ -191,10 +204,16 @@ async def get_stale_memories(
     ]
 
     for table, mem_type in tables:
+        content_expr = "content"
+        if table == "semantic_memories":
+            content_expr = "subject || ' ' || predicate || ' ' || object AS content"
+        elif table == "procedural_memories":
+            content_expr = "name || ': ' || description AS content"
+
         async with get_db_session() as session:
             result = await session.execute(
                 text(f"""
-                SELECT id, content, freshness_score, memory_category,
+                SELECT id, {content_expr}, freshness_score, memory_category,
                        decay_rate, created_at
                 FROM {table}
                 WHERE agent_id = :aid
@@ -222,17 +241,21 @@ async def get_stale_memories(
                 elif hasattr(row, "name"):
                     content_preview = row.name
 
-                stale_memories.append({
-                    "memory_id": str(row.id),
-                    "memory_type": mem_type,
-                    "content_preview": content_preview,
-                    "freshness_score": round(row.freshness_score, 4),
-                    "category": row.memory_category or "general",
-                    "decay_rate": row.decay_rate,
-                    "status": status,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
-                    "half_life_days": round(math.log(2) / row.decay_rate, 1) if row.decay_rate > 0 else None,
-                })
+                stale_memories.append(
+                    {
+                        "memory_id": str(row.id),
+                        "memory_type": mem_type,
+                        "content_preview": content_preview,
+                        "freshness_score": round(row.freshness_score, 4),
+                        "category": row.memory_category or "general",
+                        "decay_rate": row.decay_rate,
+                        "status": status,
+                        "created_at": row.created_at.isoformat() if row.created_at else None,
+                        "half_life_days": round(math.log(2) / row.decay_rate, 1)
+                        if row.decay_rate > 0
+                        else None,
+                    }
+                )
 
     # Sort all results by freshness (most stale first)
     stale_memories.sort(key=lambda m: m["freshness_score"])
@@ -240,6 +263,7 @@ async def get_stale_memories(
 
 
 # ─── B11: Staleness Report ────────────────────
+
 
 async def generate_staleness_report(
     agent_id: UUID,
@@ -252,6 +276,7 @@ async def generate_staleness_report(
     """
     if config is None:
         config = DecayConfig()
+    _ = config
 
     stale_40 = await get_stale_memories(agent_id, threshold=0.40, limit=200)
     stale_15 = [m for m in stale_40 if m["freshness_score"] < 0.15]
@@ -265,7 +290,7 @@ async def generate_staleness_report(
 
     return {
         "agent_id": str(agent_id),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "summary": {
             "warning_count": len(stale_40) - len(stale_15),
             "critical_count": len(stale_15) - len(stale_05),
@@ -291,24 +316,24 @@ def _generate_recommendations(stale: list[dict], by_category: dict[str, int]) ->
     # Identify worst categories
     if "market_data" in by_category:
         recs.append(
-            f"⚠️  {by_category['market_data']} market data memories are stale. "
+            f"WARNING  {by_category['market_data']} market data memories are stale. "
             f"Market data decays quickly (half-life: 1.4 days). Consider refreshing."
         )
     if "product_pricing" in by_category:
         recs.append(
-            f"⚠️  {by_category['product_pricing']} pricing memories are stale. "
+            f"WARNING  {by_category['product_pricing']} pricing memories are stale. "
             f"Verify current pricing before agent uses outdated information."
         )
     if "user_preference" in by_category:
         recs.append(
-            f"ℹ️  {by_category['user_preference']} user preference memories may be outdated. "
+            f"ℹ  {by_category['user_preference']} user preference memories may be outdated. "
             f"Consider prompting users to confirm their preferences."
         )
 
     critical = sum(1 for m in stale if m["status"] == "critical")
     if critical > 0:
         recs.append(
-            f"🚨 {critical} memories are in CRITICAL freshness state. "
+            f" {critical} memories are in CRITICAL freshness state. "
             f"These should be re-verified or archived immediately."
         )
 
@@ -316,6 +341,7 @@ def _generate_recommendations(stale: list[dict], by_category: dict[str, int]) ->
 
 
 # ─── B12: Webhook Events for Staleness ─────────
+
 
 async def check_and_emit_staleness_webhooks(
     agent_id: UUID,
@@ -345,7 +371,7 @@ async def check_and_emit_staleness_webhooks(
             "freshness_score": mem["freshness_score"],
             "category": mem["category"],
             "status": mem["status"],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
         events.append(event)
 
@@ -353,6 +379,7 @@ async def check_and_emit_staleness_webhooks(
         if webhook_url:
             try:
                 import httpx
+
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     await client.post(webhook_url, json=event)
                     logger.debug("Staleness webhook sent", memory_id=mem["memory_id"])
@@ -370,6 +397,7 @@ async def check_and_emit_staleness_webhooks(
 
 
 # ─── B13: Re-verification Workflow ─────────────
+
 
 async def flag_stale_for_reverification(
     agent_id: UUID,
@@ -394,7 +422,8 @@ async def flag_stale_for_reverification(
             result = await session.execute(
                 text(f"""
                 UPDATE {table}
-                SET metadata = COALESCE(metadata, '{{}}'::jsonb) || '{{"needs_reverification": true}}'::jsonb
+                SET metadata = COALESCE(metadata, '{{}}'::jsonb) ||
+                               '{{"needs_reverification": true}}'::jsonb
                 WHERE agent_id = :aid
                   AND deleted_at IS NULL
                   AND freshness_score < :threshold

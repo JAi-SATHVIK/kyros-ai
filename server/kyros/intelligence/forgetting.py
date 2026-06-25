@@ -11,13 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
 from uuid import UUID
 
 from sqlalchemy import text
 
-from kyros.storage.postgres import get_db_session
 from kyros.logging import get_logger
+from kyros.storage.postgres import get_db_session
 
 logger = get_logger("kyros.intelligence.forgetting")
 
@@ -35,20 +40,16 @@ MIN_MEMORIES_PER_AGENT = 50
 async def get_tenants_with_policies() -> list[dict]:
     """Fetch all active tenants with their plan info."""
     async with get_db_session() as session:
-        result = await session.execute(
-            text("SELECT id, plan FROM tenants WHERE is_active = true")
-        )
+        result = await session.execute(text("SELECT id, plan FROM tenants WHERE is_active = true"))
         return [{"tenant_id": row.id, "plan": row.plan} for row in result.fetchall()]
 
 
-async def find_forgettable_memories(
-    tenant_id: UUID, retention_days: int
-) -> list[dict]:
+async def find_forgettable_memories(tenant_id: UUID, retention_days: int) -> list[dict]:
     """Find memories eligible for forgetting.
 
     Uses a single aggregated query to avoid N+1 per-agent COUNT queries.
     """
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=retention_days)
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=retention_days)
 
     async with get_db_session() as session:
         # Single query: get agents with their memory counts and forgettable candidates

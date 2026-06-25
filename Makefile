@@ -1,7 +1,6 @@
 .PHONY: dev stop dev-bg logs test lint format migrate migrate-new migrate-down \
         sdk-test-python sdk-test-ts sdk-test openapi clean load-test ci \
-        website-dev website-build website-lint \
-        benchmark benchmark-locomo benchmark-msc benchmark-latency benchmark-tamper benchmark-quick
+        website-dev website-build website-lint
 
 SHELL := /bin/bash
 
@@ -74,52 +73,45 @@ load-test:
 seed:
 	docker-compose exec kyros-server python tests/seed_data.py
 
-# ─── Benchmarks ───────────────────────────────
-# ─── Benchmarks ───────────────────────────────────────────────────────────────
-# Data files are mounted from your local machine into the container at /data/
-# Override BENCHMARK_DATA_DIR in .env or on the command line if your files
-# are in a different folder.
-#
-# Usage:
-#   make benchmark-quick
-#   make benchmark-locomo
-#   make benchmark-msc
-#   make benchmark-latency
-#   make benchmark-tamper
-#   make benchmark-all
 
 benchmark-quick:
 	docker-compose exec kyros-server python tests/benchmarks/run_local.py \
 		--locomo /data/locomo10.json \
 		--msc    /data/msc_personas_all.json \
-		--quick
+		--quick \
+		--verbose
 
 benchmark-locomo:
 	docker-compose exec kyros-server python tests/benchmarks/run_local.py \
 		--locomo /data/locomo10.json \
-		--only locomo
+		--only locomo \
+		--verbose
 
 benchmark-msc:
 	docker-compose exec kyros-server python tests/benchmarks/run_local.py \
 		--msc /data/msc_personas_all.json \
-		--only msc
+		--only msc \
+		--verbose
 
 benchmark-latency:
 	docker-compose exec kyros-server python tests/benchmarks/run_local.py \
-		--only latency --scales 1000 10000
+		--only latency --scales 1000 10000 \
+		--verbose
 
 benchmark-tamper:
 	docker-compose exec kyros-server python tests/benchmarks/run_local.py \
-		--only tamper
+		--only tamper \
+		--verbose
 
 benchmark-all:
 	docker-compose exec kyros-server python tests/benchmarks/run_local.py \
 		--locomo /data/locomo10.json \
-		--msc    /data/msc_personas_all.json
+		--msc    /data/msc_personas_all.json \
+		--verbose
 
 # ─── Full CI locally ──────────────────────────
 ci: lint test sdk-test
-	@echo "✅ All checks passed"
+	@echo " All checks passed"
 
 # ─── Website ──────────────────────────────────
 website-dev:

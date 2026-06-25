@@ -1,0 +1,47 @@
+---
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g., v1.2.3)"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  release-notes:
+    name: Generate Release Notes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        uses: mikepenz/release-changelog-builder-action@v5
+        with:
+          configuration: ".github/release-drafter.yml"
+          commitMode: true
+          outputFile: CHANGELOG_RELEASE.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+          name: "Kyros ${{ github.event.inputs.version || github.ref_name }}"
+          body_path: CHANGELOG_RELEASE.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

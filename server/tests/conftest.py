@@ -17,7 +17,9 @@ if _server_root not in sys.path:
     sys.path.insert(0, _server_root)
 
 # Ensure required settings exist even when .env is not present in CI/local test runs.
-os.environ.setdefault("KYROS_DATABASE_URL", "postgresql+asyncpg://kyros:test@localhost:5432/kyros_test")
+os.environ.setdefault(
+    "KYROS_DATABASE_URL", "postgresql+asyncpg://kyros:test@localhost:5432/kyros_test"
+)
 os.environ.setdefault("KYROS_REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("KYROS_JWT_SECRET_KEY", "ci-test-secret-key-minimum-32-chars")
 
@@ -28,7 +30,7 @@ class SessionAdapter:
     """Compat wrapper: transparently wraps raw SQL strings in text() so tests
     can use plain strings without importing sqlalchemy in every test file."""
 
-    def __init__(self, session):
+    def __init__(self, session) -> None:
         self._session = session
 
     async def execute(self, statement, *args, **kwargs):

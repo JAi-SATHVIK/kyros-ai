@@ -15,8 +15,13 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from datetime import datetime
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
 
 from kyros.logging import get_logger
 
@@ -24,8 +29,8 @@ logger = get_logger("kyros.intelligence.compression")
 
 # ─── Configuration ─────────────────────────────
 
-BATCH_SIZE_L1 = 20        # Raw memories per L1 paragraph
-BATCH_SIZE_L2 = 5         # L1 paragraphs per L2 page
+BATCH_SIZE_L1 = 20  # Raw memories per L1 paragraph
+BATCH_SIZE_L2 = 5  # L1 paragraphs per L2 page
 MIN_MEMORIES_TO_COMPRESS = 100  # Don't compress agents with fewer
 COMPRESSION_BACKEND = os.environ.get("KYROS_COMPRESSION_BACKEND", "extractive")
 
@@ -33,6 +38,7 @@ COMPRESSION_BACKEND = os.environ.get("KYROS_COMPRESSION_BACKEND", "extractive")
 @dataclass
 class CompressionResult:
     """Output of a compression operation."""
+
     summary: str
     input_count: int
     output_level: int
@@ -43,12 +49,13 @@ class CompressionResult:
 @dataclass
 class HistoryCard:
     """The final L3 summary — a complete agent history in one card."""
+
     agent_id: str
     summary: str
     memory_count: int
     compression_ratio: float
     levels: dict = field(default_factory=dict)
-    generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class CompressionEngine:
@@ -58,7 +65,7 @@ class CompressionEngine:
     L1 (paragraph), L2 (page), L3 (history card).
     """
 
-    def __init__(self, backend: str | None = None):
+    def __init__(self, backend: str | None = None) -> None:
         self.backend = backend or COMPRESSION_BACKEND
         logger.info("Compression engine initialised", backend=self.backend)
 
@@ -78,8 +85,11 @@ class CompressionEngine:
 
         if not memories:
             return CompressionResult(
-                summary="", input_count=0, output_level=target_level,
-                compression_ratio=0.0, latency_ms=0.0,
+                summary="",
+                input_count=0,
+                output_level=target_level,
+                compression_ratio=0.0,
+                latency_ms=0.0,
             )
 
         if self.backend == "extractive":
@@ -137,7 +147,7 @@ class CompressionEngine:
             selected = sentences[:max_sentences]
             return ". ".join(selected) + "." if selected else ""
 
-        elif level == 2:
+        if level == 2:
             # L2: Merge paragraphs, extract key points
             all_text = " ".join(contents)
             sentences = [s.strip() for s in all_text.split(". ") if len(s.strip()) > 15]
@@ -145,13 +155,12 @@ class CompressionEngine:
             keep = max(3, len(sentences) // 5)
             return ". ".join(sentences[:keep]) + "." if sentences else ""
 
-        else:
-            # L3: Final card — extremely concise
-            all_text = " ".join(contents)
-            sentences = [s.strip() for s in all_text.split(". ") if len(s.strip()) > 15]
-            keep = max(2, len(sentences) // 10)
-            header = f"Agent history ({len(memories)} sources): "
-            return header + ". ".join(sentences[:keep]) + "."
+        # L3: Final card — extremely concise
+        all_text = " ".join(contents)
+        sentences = [s.strip() for s in all_text.split(". ") if len(s.strip()) > 15]
+        keep = max(2, len(sentences) // 10)
+        header = f"Agent history ({len(memories)} sources): "
+        return header + ". ".join(sentences[:keep]) + "."
 
     def _llm_compress(self, memories: list[dict], level: int, provider: str) -> str:
         """LLM-based compression (production quality).
@@ -167,9 +176,19 @@ class CompressionEngine:
         joined = "\n- ".join(contents)
 
         level_instructions = {
-            1: "Summarise these conversation turns into ONE paragraph. Preserve key facts, decisions, and user preferences.",
-            2: "Summarise these paragraph summaries into a single page. Focus on overarching themes, important decisions, and recurring patterns.",
-            3: "Create a concise history card from these summaries. This should be a brief profile capturing the most important information about the agent's interactions.",
+            1: (
+                "Summarise these conversation turns into ONE paragraph. "
+                "Preserve key facts, decisions, and user preferences."
+            ),
+            2: (
+                "Summarise these paragraph summaries into a single page. "
+                "Focus on overarching themes, important decisions, and recurring patterns."
+            ),
+            3: (
+                "Create a concise history card from these summaries. "
+                "This should be a brief profile capturing the most important information "
+                "about the agent's interactions."
+            ),
         }
 
         prompt = f"""{level_instructions.get(level, level_instructions[1])}
@@ -182,11 +201,10 @@ Summary:"""
         try:
             if provider == "openai":
                 return self._call_openai(prompt)
-            elif provider == "anthropic":
+            if provider == "anthropic":
                 return self._call_anthropic(prompt)
-            else:
-                logger.warning("Unknown LLM provider, falling back to extractive", provider=provider)
-                return self._extractive_compress(memories, level)
+            logger.warning("Unknown LLM provider, falling back to extractive", provider=provider)
+            return self._extractive_compress(memories, level)
         except Exception as e:
             logger.error("LLM compression failed, falling back to extractive", error=str(e))
             return self._extractive_compress(memories, level)
@@ -211,7 +229,13 @@ Summary:"""
                 json={
                     "model": os.environ.get("KYROS_OPENAI_MODEL", "gpt-4o-mini"),
                     "messages": [
-                        {"role": "system", "content": "You are a concise summariser. Output only the summary, no preamble."},
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a concise summariser. "
+                                "Output only the summary, no preamble."
+                            ),
+                        },
                         {"role": "user", "content": prompt},
                     ],
                     "max_tokens": 500,
@@ -253,9 +277,7 @@ Summary:"""
 
     # ─── Hierarchical Compression Pipeline ─────
 
-    def compress_agent_memories(
-        self, raw_memories: list[dict]
-    ) -> HistoryCard:
+    def compress_agent_memories(self, raw_memories: list[dict]) -> HistoryCard:
         """Run the full L1→L2→L3 compression pipeline.
 
         Args:

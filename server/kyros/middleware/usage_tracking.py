@@ -23,25 +23,27 @@ logger = get_logger("kyros.usage")
 
 OPERATION_MAP: dict[str, str] = {
     "/v1/memory/episodic/remember": "episodic.remember",
-    "/v1/memory/episodic/recall":   "episodic.recall",
-    "/v1/memory/semantic/facts":    "semantic.store_fact",
-    "/v1/memory/semantic/query":    "semantic.query",
-    "/v1/memory/procedural/store":  "procedural.store",
-    "/v1/memory/procedural/match":  "procedural.match",
-    "/v1/memory/procedural/outcome":"procedural.outcome",
-    "/v1/search/unified":           "search.unified",
-    "/v1/admin/summarise":          "admin.summarise",
-    "/v1/admin/export":             "admin.export",
-    "/v1/admin/import":             "admin.import",
+    "/v1/memory/episodic/recall": "episodic.recall",
+    "/v1/memory/semantic/facts": "semantic.store_fact",
+    "/v1/memory/semantic/query": "semantic.query",
+    "/v1/memory/procedural/store": "procedural.store",
+    "/v1/memory/procedural/match": "procedural.match",
+    "/v1/memory/procedural/outcome": "procedural.outcome",
+    "/v1/search/unified": "search.unified",
+    "/v1/admin/summarise": "admin.summarise",
+    "/v1/admin/export": "admin.export",
+    "/v1/admin/import": "admin.import",
 }
 
-SKIP_PATHS: frozenset[str] = frozenset({
-    "/health",
-    "/health/ready",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
-})
+SKIP_PATHS: frozenset[str] = frozenset(
+    {
+        "/health",
+        "/health/ready",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+    }
+)
 
 
 def _extract_memory_type(path: str) -> str | None:
@@ -111,9 +113,7 @@ async def _track(
 class UsageTrackingMiddleware(BaseHTTPMiddleware):
     """Logs every billable API operation to the usage_events table."""
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
         method = request.method
 
@@ -130,21 +130,24 @@ class UsageTrackingMiddleware(BaseHTTPMiddleware):
 
         operation = _resolve_operation(path, method)
         if operation:
-            # Use the global tracked task registry if available (main.py)
-            # Falls back to plain create_task if running outside the main app
-            try:
-                from kyros.main import create_background_task
-                create_background_task(
-                    _track(tenant_id, operation, _extract_memory_type(path), latency_ms, path)
+            create_bg_task = getattr(request.app.state, "create_background_task", None)
+            if create_bg_task:
+                # Preserve name/details for the tracked background task API
+                create_bg_task(
+                    _track(tenant_id, operation, _extract_memory_type(path), latency_ms, path),
+                    name="track_usage",
+                    details=f"Logging API operation: {operation} (latency: {latency_ms}ms)",
                 )
-            except ImportError:
+            else:
                 task = asyncio.create_task(
                     _track(tenant_id, operation, _extract_memory_type(path), latency_ms, path)
                 )
                 task.add_done_callback(
-                    lambda t: logger.error("Usage task failed", error=str(t.exception()))
-                    if not t.cancelled() and t.exception()
-                    else None
+                    lambda t: (
+                        logger.error("Usage task failed", error=str(t.exception()))
+                        if not t.cancelled() and t.exception()
+                        else None
+                    )
                 )
 
         return response

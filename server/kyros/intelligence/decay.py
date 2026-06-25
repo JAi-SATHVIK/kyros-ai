@@ -19,9 +19,14 @@ Where:
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from datetime import datetime
 
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
 
 # ─── B04: Decay Rate Lookup Table ─────────────
 
@@ -33,27 +38,25 @@ from dataclasses import dataclass, field
 
 DEFAULT_DECAY_RATES: dict[str, float] = {
     # ── Episodic categories ──
-    "general":           0.020,   # half-life ~35 days (conversations, events)
-    "conversation":      0.025,   # half-life ~28 days (chat turns)
-    "observation":       0.015,   # half-life ~46 days (agent observations)
-    "decision":          0.010,   # half-life ~69 days (decisions persist longer)
-    "meeting":           0.020,   # half-life ~35 days (meeting notes)
-
+    "general": 0.020,  # half-life ~35 days (conversations, events)
+    "conversation": 0.025,  # half-life ~28 days (chat turns)
+    "observation": 0.015,  # half-life ~46 days (agent observations)
+    "decision": 0.010,  # half-life ~69 days (decisions persist longer)
+    "meeting": 0.020,  # half-life ~35 days (meeting notes)
     # ── Semantic categories ──
-    "fact":              0.005,   # half-life ~139 days (general facts)
-    "user_preference":   0.020,   # half-life ~35 days (preferences change)
-    "user_identity":     0.001,   # half-life ~693 days (names, emails rarely change)
-    "company_structure": 0.005,   # half-life ~139 days (org charts)
-    "market_data":       0.500,   # half-life ~1.4 days (prices, rates)
-    "product_pricing":   0.100,   # half-life ~7 days (pricing changes)
-    "regulatory_rule":   0.001,   # half-life ~693 days (regulations are stable)
-    "technical_spec":    0.010,   # half-life ~69 days (specs evolve slowly)
-
+    "fact": 0.005,  # half-life ~139 days (general facts)
+    "user_preference": 0.020,  # half-life ~35 days (preferences change)
+    "user_identity": 0.001,  # half-life ~693 days (names, emails rarely change)
+    "company_structure": 0.005,  # half-life ~139 days (org charts)
+    "market_data": 0.500,  # half-life ~1.4 days (prices, rates)
+    "product_pricing": 0.100,  # half-life ~7 days (pricing changes)
+    "regulatory_rule": 0.001,  # half-life ~693 days (regulations are stable)
+    "technical_spec": 0.010,  # half-life ~69 days (specs evolve slowly)
     # ── Procedural categories ──
-    "workflow":          0.010,   # half-life ~69 days (workflows evolve)
-    "api_usage":         0.050,   # half-life ~14 days (APIs change often)
-    "deployment":        0.030,   # half-life ~23 days (infra changes)
-    "troubleshooting":   0.020,   # half-life ~35 days (solutions may expire)
+    "workflow": 0.010,  # half-life ~69 days (workflows evolve)
+    "api_usage": 0.050,  # half-life ~14 days (APIs change often)
+    "deployment": 0.030,  # half-life ~23 days (infra changes)
+    "troubleshooting": 0.020,  # half-life ~35 days (solutions may expire)
 }
 
 
@@ -68,7 +71,7 @@ class DecayConfig:
     custom_rates: dict[str, float] = field(default_factory=dict)
     freshness_warning_threshold: float = 0.40  # Alert when freshness < 40%
     freshness_critical_threshold: float = 0.15  # Critical when freshness < 15%
-    auto_archive_threshold: float = 0.05        # Auto-archive when freshness < 5%
+    auto_archive_threshold: float = 0.05  # Auto-archive when freshness < 5%
 
     def get_rate(self, category: str) -> float:
         """Get decay rate for a category, with tenant override support.
@@ -93,6 +96,7 @@ class DecayConfig:
 
 # ─── B05: Freshness Score Formula ─────────────
 
+
 def calculate_freshness(
     created_at: datetime,
     decay_rate: float,
@@ -114,13 +118,13 @@ def calculate_freshness(
         Freshness score between 0.0 (completely stale) and 1.0 (fully fresh).
     """
     if now is None:
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
 
     # Ensure both are naive or both are aware
     if created_at.tzinfo is not None and now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
+        now = now.replace(tzinfo=UTC)
     elif created_at.tzinfo is None and now.tzinfo is not None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
+        created_at = created_at.replace(tzinfo=UTC)
 
     age_seconds = max(0, (now - created_at).total_seconds())
     age_days = age_seconds / 86400.0
@@ -139,7 +143,7 @@ class FreshnessResult:
     age_days: float
     decay_rate: float
     half_life_days: float
-    status: str                # "fresh", "warning", "critical", "stale"
+    status: str  # "fresh", "warning", "critical", "stale"
     category: str
 
 
@@ -166,7 +170,7 @@ def evaluate_freshness(
         config = DecayConfig()
 
     if now is None:
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
 
     decay_rate = config.get_rate(category)
     freshness = calculate_freshness(created_at, decay_rate, base_confidence, now)
@@ -174,9 +178,9 @@ def evaluate_freshness(
 
     # Ensure timezone handling
     if created_at.tzinfo is not None and now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
+        now = now.replace(tzinfo=UTC)
     elif created_at.tzinfo is None and now.tzinfo is not None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
+        created_at = created_at.replace(tzinfo=UTC)
 
     age_days = max(0, (now - created_at).total_seconds()) / 86400.0
 
@@ -232,13 +236,25 @@ def batch_freshness_update(
     if config is None:
         config = DecayConfig()
     if now is None:
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
 
     updates = []
     for mem in memories:
         created_at = mem.get("created_at")
         if isinstance(created_at, str):
             created_at = datetime.fromisoformat(created_at)
+
+        # Skip if created_at is None or invalid
+        if not isinstance(created_at, datetime):
+            continue
+
+        # Skip if created_at is None or invalid
+        if not isinstance(created_at, datetime):
+            continue
+
+        # Skip if created_at is None or invalid
+        if not isinstance(created_at, datetime):
+            continue
 
         result = evaluate_freshness(
             created_at=created_at,
@@ -247,12 +263,14 @@ def batch_freshness_update(
             now=now,
         )
 
-        updates.append({
-            "id": mem.get("id"),
-            "new_freshness": result.freshness_score,
-            "status": result.status,
-            "should_warn": result.status == "warning",
-            "should_archive": result.status == "stale",
-        })
+        updates.append(
+            {
+                "id": mem.get("id"),
+                "new_freshness": result.freshness_score,
+                "status": result.status,
+                "should_warn": result.status == "warning",
+                "should_archive": result.status == "stale",
+            }
+        )
 
     return updates

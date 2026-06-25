@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
+from typing import Any
 
 from fastapi import APIRouter
 
@@ -10,7 +16,7 @@ router = APIRouter()
 
 
 @router.get("/status")
-async def get_trust_status():
+async def get_trust_status() -> dict[str, Any]:
     """Return the current trust and compliance status of the platform.
 
     Update the compliance fields to reflect your actual certification status
@@ -18,7 +24,7 @@ async def get_trust_status():
     """
     return {
         "status": "operational",
-        "last_updated": datetime.now(timezone.utc).isoformat(),
+        "last_updated": datetime.now(UTC).isoformat(),
         "compliance": {
             "soc2_type_1": "not_certified",
             "soc2_type_2": "not_certified",

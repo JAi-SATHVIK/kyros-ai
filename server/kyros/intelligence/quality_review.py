@@ -11,9 +11,14 @@ Usage:
 from __future__ import annotations
 
 import random
-from datetime import datetime, timezone
+from datetime import datetime
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
 
-from kyros.intelligence.compression import CompressionEngine, BATCH_SIZE_L1
+from kyros.intelligence.compression import BATCH_SIZE_L1, CompressionEngine
 from kyros.logging import get_logger
 
 logger = get_logger("kyros.intelligence.quality_review")
@@ -50,7 +55,9 @@ def generate_synthetic_memories(count: int) -> list[dict]:
             topic=random.choice(topics),
             action=random.choice(actions),
             time=random.randint(50, 5000),
-            preference=f"prefers {random.choice(['dark mode', 'light mode', 'Python', 'TypeScript'])}",
+            preference=(
+                f"prefers {random.choice(['dark mode', 'light mode', 'Python', 'TypeScript'])}"
+            ),
             operation=random.choice(actions),
             error=f"timeout after {random.randint(10, 60)}s",
             company=random.choice(companies),
@@ -58,29 +65,33 @@ def generate_synthetic_memories(count: int) -> list[dict]:
             tool=random.choice(tools),
             params=f"query='{random.choice(topics)}'",
             result=f"200 OK, {random.randint(1, 50)} results",
-            feedback=random.choice(["Great!", "Could be faster", "Love the new feature", "Needs improvement"]),
+            feedback=random.choice(
+                ["Great!", "Could be faster", "Love the new feature", "Needs improvement"]
+            ),
             plan=random.choice(["free", "pro", "team"]),
-            date=f"2026-{random.randint(1,12):02d}-{random.randint(1,28):02d}",
+            date=f"2026-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}",
         )
         try:
             content = template.format(**fmt_kwargs)
         except KeyError:
             content = f"Memory item {i}: synthetic test data."
-        memories.append({
-            "content": content,
-            "importance": round(random.uniform(0.1, 1.0), 2),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
+        memories.append(
+            {
+                "content": content,
+                "importance": round(random.uniform(0.1, 1.0), 2),
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+        )
 
     return memories
 
 
-def run_quality_review():
+def run_quality_review() -> None:
     """Generate compression summaries for quality review."""
     engine = CompressionEngine()
 
     print("# Compression Quality Review Report")
-    print(f"Generated: {datetime.now(timezone.utc).isoformat()}")
+    print(f"Generated: {datetime.now(UTC).isoformat()}")
     print(f"Backend: {engine.backend}")
     print(f"Batch size: {BATCH_SIZE_L1}")
     print(f"Reviews: {NUM_REVIEWS}")
@@ -98,7 +109,9 @@ def run_quality_review():
         result = engine.compress_batch(memories, target_level=1)
 
         print(f"## Review #{review_num}")
-        print(f"- **Input**: {batch_size} memories ({sum(len(m['content']) for m in memories)} chars)")
+        print(
+            f"- **Input**: {batch_size} memories ({sum(len(m['content']) for m in memories)} chars)"
+        )
         print(f"- **Output**: {len(result.summary)} chars")
         print(f"- **Ratio**: {result.compression_ratio}:1")
         print(f"- **Latency**: {result.latency_ms}ms")
@@ -114,20 +127,20 @@ def run_quality_review():
         # Quality checks
         checks = []
         if result.compression_ratio >= 3.0:
-            checks.append("✅ Ratio ≥ 3:1")
+            checks.append("Success Ratio ≥ 3:1")
         else:
-            checks.append("⚠️ Ratio < 3:1")
+            checks.append("WARNING Ratio < 3:1")
 
         if len(result.summary) > 20:
-            checks.append("✅ Non-trivial output")
+            checks.append("Success Non-trivial output")
         else:
-            checks.append("⚠️ Output too short")
+            checks.append("WARNING Output too short")
 
         if result.summary and not result.summary.startswith("Error"):
-            checks.append("✅ No errors")
+            checks.append("Success No errors")
             passing += 1
         else:
-            checks.append("❌ Error in output")
+            checks.append("ERROR Error in output")
 
         print(f"### Checks: {' | '.join(checks)}")
         print()
@@ -139,7 +152,7 @@ def run_quality_review():
     avg_ratio = total_ratio / NUM_REVIEWS if NUM_REVIEWS > 0 else 0
     print("## Summary")
     print(f"- **Average ratio**: {avg_ratio:.1f}:1")
-    print(f"- **Pass rate**: {passing}/{NUM_REVIEWS} ({100*passing/NUM_REVIEWS:.0f}%)")
+    print(f"- **Pass rate**: {passing}/{NUM_REVIEWS} ({100 * passing / NUM_REVIEWS:.0f}%)")
     print("- **Target**: 20:1 compression ratio")
 
 

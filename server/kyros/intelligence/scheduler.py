@@ -15,9 +15,9 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
-from kyros.intelligence.compression import CompressionEngine, MIN_MEMORIES_TO_COMPRESS, HistoryCard
-from kyros.storage.postgres import get_db_session, get_db_session_for_tenant
+from kyros.intelligence.compression import MIN_MEMORIES_TO_COMPRESS, CompressionEngine, HistoryCard
 from kyros.logging import get_logger
+from kyros.storage.postgres import get_db_session, get_db_session_for_tenant
 
 logger = get_logger("kyros.intelligence.scheduler")
 
@@ -123,13 +123,15 @@ async def compress_agent(
                 "agent_id": agent_id,
                 "tenant_id": tenant_id,
                 "content": card.summary,
-                "metadata": json.dumps({
-                    "compression": True,
-                    "level": 3,
-                    "source_count": card.memory_count,
-                    "compression_ratio": card.compression_ratio,
-                    "levels": card.levels,
-                }),
+                "metadata": json.dumps(
+                    {
+                        "compression": True,
+                        "level": 3,
+                        "source_count": card.memory_count,
+                        "compression_ratio": card.compression_ratio,
+                        "levels": card.levels,
+                    }
+                ),
             },
         )
 

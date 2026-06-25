@@ -7,16 +7,30 @@ memories into a directed graph of cause-and-effect.
 from __future__ import annotations
 
 import json
-from uuid import UUID, uuid4
-from datetime import datetime, timezone
+import re
+from datetime import datetime
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
 from typing import Any
+from uuid import UUID, uuid4
 
-from kyros.ml.models import call_llm
-from kyros.storage.postgres import get_db_session, get_db_session_for_tenant
-from kyros.logging import get_logger
 from sqlalchemy import text
 
+from kyros.logging import get_logger
+from kyros.ml.models import call_llm
+from kyros.storage.postgres import get_db_session, get_db_session_for_tenant
+
 logger = get_logger("kyros.causal")
+
+# Global callback for tracing (used by benchmarks)
+_causal_trace_callback = None
+
+def set_causal_trace_callback(callback):
+    global _causal_trace_callback
+    _causal_trace_callback = callback
 
 
 # ─── D03: Causal Extraction Prompt ────────────
@@ -56,6 +70,7 @@ Format:
 
 # ─── D04: Causal Extractor Service ────────────
 
+
 async def extract_and_store_causal_edges(
     tenant_id: UUID | None,
     agent_id: UUID,
@@ -79,10 +94,7 @@ async def extract_and_store_causal_edges(
         return []
 
     # Format context
-    context_str = "\n".join(
-        f"- ID: {m['id']}\n  Content: {m['content']}"
-        for m in recent_memories
-    )
+    context_str = "\n".join(f"- ID: {m['id']}\n  Content: {m['content']}" for m in recent_memories)
 
     prompt = CAUSAL_EXTRACTION_PROMPT.format(
         new_id=str(new_memory_id),
@@ -91,19 +103,42 @@ async def extract_and_store_causal_edges(
     )
 
     try:
+        print(f"      [CAUSAL] Extracting links for turn: {new_content[:50]}...")
         response_text = await call_llm(prompt, temperature=0.1)
-        # Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
+        if not response_text or not response_text.strip():
+            print(f"      [CAUSAL] No causal links found (empty response)")
+            return []
+
         cleaned = response_text.strip()
-        if cleaned.startswith("```"):
+        
+        start_idx = cleaned.find('[')
+        end_idx = cleaned.rfind(']')
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            cleaned = cleaned[start_idx:end_idx+1]
+        elif cleaned.startswith("```"):
             cleaned = cleaned.split("```", 2)[-1] if cleaned.count("```") >= 2 else cleaned
             cleaned = cleaned.removeprefix("json").strip().strip("`").strip()
-        edges = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        logger.warning("Causal extraction returned non-JSON response", error=str(e))
-        return []
+        
+        try:
+            edges = json.loads(cleaned)
+        except json.JSONDecodeError:
+            try:
+                # Remove trailing commas
+                cleaned_fixed = re.sub(r',\s*([\]}])', r'\1', cleaned)
+                edges = json.loads(cleaned_fixed)
+            except Exception:
+                logger.warning("Causal extraction returned non-JSON response", error_raw=response_text[:200])
+                return []
+
+        if edges:
+            print(f"      [CAUSAL] Extracted {len(edges)} causal links")
+            if _causal_trace_callback:
+                _causal_trace_callback("CAUSAL_EXTRACTED", f"Found {len(edges)} links", {"edges": edges})
+        else:
+            print(f"      [CAUSAL] No causal links found")
     except Exception as e:
         logger.error("Failed to extract causal edges", error=str(e))
-        return []
+        raise e
 
     if not edges:
         return []
@@ -113,6 +148,7 @@ async def extract_and_store_causal_edges(
 
 # ─── D05: Store Causal Edges ──────────────────
 
+
 async def store_causal_edges(
     tenant_id: UUID | None,
     agent_id: UUID,
@@ -121,10 +157,11 @@ async def store_causal_edges(
     """Store explicit causal edges in the graph database.
 
     Args:
-        edges: List of dicts containing from_memory_id, to_memory_id, relation, confidence, description.
+        edges: List of dicts containing from_memory_id, to_memory_id, relation,
+                    confidence, description.
     """
     stored_edges = []
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
     tenant_id_to_use = tenant_id or uuid4()
 
     async with get_db_session_for_tenant(str(tenant_id_to_use)) as session:
@@ -169,133 +206,171 @@ async def store_causal_edges(
 
 # ─── D06: Causal Chain Traversal ──────────────
 
+
 async def traverse_causal_chain(
     agent_id: UUID,
     memory_id: UUID,
     max_depth: int = 3,
     direction: str = "both",
+    session: Any | None = None,
 ) -> dict:
     """Traverse the causal graph starting from a specific memory.
 
     Returns the 'ancestry' (causes) and/or 'descendants' (effects) of a memory.
-
-    Args:
-        agent_id: The agent ID.
-        memory_id: The starting memory node.
-        max_depth: How many hops to traverse.
-        direction: 'causes' (upstream), 'effects' (downstream), or 'both'.
-
-    Returns:
-        Graph dictionary with nodes and edges.
+    Ensures a strict 50ms latency budget in production.
     """
-    nodes = {}
-    edges = []
+    import asyncio
 
-    async with get_db_session() as session:
-        # First, get the starting node
-        for table in ["episodic_memories", "semantic_memories", "procedural_memories"]:
-            result = await session.execute(
-                text(f"SELECT id, content FROM {table} WHERE id = :id AND agent_id = :agent_id"),
-                {"id": memory_id, "agent_id": agent_id}
-            )
-            row = result.fetchone()
-            if row:
-                nodes[str(row.id)] = {"id": str(row.id), "content": row.content}
-                break
-                
+    async def _traverse_with_session(db_session: Any, depth_limit: int):
+        nodes = {}
+        edges = []
+
+        # Consolidated starting node lookup in a single query
+        start_result = await db_session.execute(
+            text("""
+                SELECT id, content FROM episodic_memories WHERE id = :id AND agent_id = :agent_id
+                UNION ALL
+                SELECT id, (subject || ' ' || predicate || ': ' || object) as content FROM semantic_memories WHERE id = :id AND agent_id = :agent_id
+                UNION ALL
+                SELECT id, (name || ': ' || description) as content FROM procedural_memories WHERE id = :id AND agent_id = :agent_id
+            """),
+            {"id": memory_id, "agent_id": agent_id},
+        )
+        row = start_result.fetchone()
+        if row:
+            nodes[str(row.id)] = {"id": str(row.id), "content": row.content}
+
         if not nodes:
             return {"nodes": [], "edges": []}
 
         # Recursive CTE for graph traversal
-        # We need upstream (causes) and downstream (effects)
-        
         if direction in ("causes", "both"):
             # Find what caused this memory (upstream)
-            result = await session.execute(
+            result = await db_session.execute(
                 text("""
                 WITH RECURSIVE causal_tree AS (
-                    SELECT from_memory_id, to_memory_id, relation, confidence, description, 1 as depth
+                    SELECT from_memory_id, to_memory_id, relation,
+                    confidence, description, 1 as depth
                     FROM causal_edges
                     WHERE to_memory_id = :start_id AND agent_id = :agent_id
-                    
+
                     UNION ALL
-                    
-                    SELECT ce.from_memory_id, ce.to_memory_id, ce.relation, ce.confidence, ce.description, ct.depth + 1
+
+                    SELECT ce.from_memory_id, ce.to_memory_id, ce.relation,
+                           ce.confidence, ce.description, ct.depth + 1
                     FROM causal_edges ce
                     JOIN causal_tree ct ON ce.to_memory_id = ct.from_memory_id
                     WHERE ce.agent_id = :agent_id AND ct.depth < :max_depth
                 )
                 SELECT * FROM causal_tree
                 """),
-                {"start_id": memory_id, "agent_id": agent_id, "max_depth": max_depth}
+                {"start_id": memory_id, "agent_id": agent_id, "max_depth": depth_limit},
             )
             for row in result.fetchall():
-                edges.append({
-                    "from": str(row.from_memory_id),
-                    "to": str(row.to_memory_id),
-                    "relation": row.relation,
-                    "confidence": row.confidence,
-                    "description": row.description,
-                    "direction": "upstream",
-                    "depth": row.depth
-                })
+                edges.append(
+                    {
+                        "from": str(row.from_memory_id),
+                        "to": str(row.to_memory_id),
+                        "relation": row.relation,
+                        "confidence": row.confidence,
+                        "description": row.description,
+                        "direction": "upstream",
+                        "depth": row.depth,
+                    }
+                )
 
         if direction in ("effects", "both"):
             # Find what this memory caused (downstream)
-            result = await session.execute(
+            result = await db_session.execute(
                 text("""
                 WITH RECURSIVE causal_tree AS (
-                    SELECT from_memory_id, to_memory_id, relation, confidence, description, 1 as depth
+                    SELECT from_memory_id, to_memory_id, relation,
+                    confidence, description, 1 as depth
                     FROM causal_edges
                     WHERE from_memory_id = :start_id AND agent_id = :agent_id
-                    
+
                     UNION ALL
-                    
-                    SELECT ce.from_memory_id, ce.to_memory_id, ce.relation, ce.confidence, ce.description, ct.depth + 1
+
+                    SELECT ce.from_memory_id, ce.to_memory_id, ce.relation,
+                           ce.confidence, ce.description, ct.depth + 1
                     FROM causal_edges ce
                     JOIN causal_tree ct ON ce.from_memory_id = ct.to_memory_id
                     WHERE ce.agent_id = :agent_id AND ct.depth < :max_depth
                 )
                 SELECT * FROM causal_tree
                 """),
-                {"start_id": memory_id, "agent_id": agent_id, "max_depth": max_depth}
+                {"start_id": memory_id, "agent_id": agent_id, "max_depth": depth_limit},
             )
             for row in result.fetchall():
-                edges.append({
-                    "from": str(row.from_memory_id),
-                    "to": str(row.to_memory_id),
-                    "relation": row.relation,
-                    "confidence": row.confidence,
-                    "description": row.description,
-                    "direction": "downstream",
-                    "depth": row.depth
-                })
+                edges.append(
+                    {
+                        "from": str(row.from_memory_id),
+                        "to": str(row.to_memory_id),
+                        "relation": row.relation,
+                        "confidence": row.confidence,
+                        "description": row.description,
+                        "direction": "downstream",
+                        "depth": row.depth,
+                    }
+                )
 
         # Fetch missing node contents
         missing_nodes = set()
         for e in edges:
             missing_nodes.add(e["from"])
             missing_nodes.add(e["to"])
-        
+
         missing_nodes -= set(nodes.keys())
-        
+
         if missing_nodes:
             missing_ids = list(missing_nodes)
-            for table in ["episodic_memories", "semantic_memories", "procedural_memories"]:
-                result = await session.execute(
-                    text(f"SELECT id, content FROM {table} WHERE id = ANY(:ids::uuid[])"),
-                    {"ids": missing_ids}
-                )
-                for row in result.fetchall():
-                    nodes[str(row.id)] = {"id": str(row.id), "content": row.content}
+            missing_result = await db_session.execute(
+                text("""
+                    SELECT id, content FROM episodic_memories WHERE id = ANY(:ids::uuid[])
+                    UNION ALL
+                    SELECT id, (subject || ' ' || predicate || ': ' || object) as content FROM semantic_memories WHERE id = ANY(:ids::uuid[])
+                    UNION ALL
+                    SELECT id, (name || ': ' || description) as content FROM procedural_memories WHERE id = ANY(:ids::uuid[])
+                """),
+                {"ids": missing_ids},
+            )
+            for row in missing_result.fetchall():
+                nodes[str(row.id)] = {"id": str(row.id), "content": row.content}
 
-    return {
-        "nodes": list(nodes.values()),
-        "edges": edges,
-    }
+        return {
+            "nodes": list(nodes.values()),
+            "edges": edges,
+        }
+
+    async def _traverse_handler(depth_limit: int):
+        if session is not None:
+            return await _traverse_with_session(session, depth_limit)
+        else:
+            async with get_db_session() as new_session:
+                return await _traverse_with_session(new_session, depth_limit)
+
+    try:
+        # Enforce strict 50ms latency budget in production for graph traversal
+        return await asyncio.wait_for(_traverse_handler(max_depth), timeout=0.05)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Causal graph traversal timed out (>50ms) — falling back to shallow traversal",
+            agent_id=str(agent_id),
+            memory_id=str(memory_id),
+        )
+        try:
+            # Fallback to shallow single-hop traversal with 20ms budget
+            return await asyncio.wait_for(_traverse_handler(1), timeout=0.02)
+        except Exception as e:
+            logger.error("Causal graph fallback traversal failed", error=str(e))
+            return {"nodes": [], "edges": []}
+    except Exception as e:
+        logger.error("Causal graph traversal failed with error", error=str(e))
+        return {"nodes": [], "edges": []}
 
 
 # ─── D09: Causal Frequency Analysis ───────────
+
 
 async def analyze_causal_frequencies(
     agent_id: UUID,
@@ -304,14 +379,14 @@ async def analyze_causal_frequencies(
     limit: int = 50,
 ) -> dict:
     """Analyze what causes a specific type of event across the entire memory.
-    
+
     1. Embed the effect_theme (e.g., "customer churn").
     2. Find memories that semantically match this theme.
     3. Traverse upstream (causes) for those memories.
     4. Use an LLM to group and count the root causes.
     """
     query_embedding = embedder.embed(effect_theme)
-    
+
     async with get_db_session() as session:
         # Find episodic memories matching the effect theme
         result = await session.execute(
@@ -322,17 +397,13 @@ async def analyze_causal_frequencies(
             ORDER BY sim DESC
             LIMIT :limit
             """),
-            {
-                "agent_id": agent_id,
-                "embedding": query_embedding,
-                "limit": limit
-            }
+            {"agent_id": agent_id, "embedding": query_embedding, "limit": limit},
         )
         effect_memories = result.fetchall()
-        
+
     if not effect_memories:
         return {"theme": effect_theme, "causes": []}
-        
+
     # Find causes for these effects
     all_causes = []
     for mem in effect_memories:
@@ -344,18 +415,18 @@ async def analyze_causal_frequencies(
                 cause_node = next((n for n in graph["nodes"] if n["id"] == cause_id), None)
                 if cause_node:
                     all_causes.append(cause_node["content"])
-                    
+
     if not all_causes:
         return {"theme": effect_theme, "causes": []}
-        
+
     # Use LLM to group and summarize frequencies
     prompt = f"""
     Analyze the following list of root causes for the theme: "{effect_theme}".
     Group similar causes together and calculate their frequency.
-    
+
     Raw Causes:
     {json.dumps(all_causes, indent=2)}
-    
+
     Respond ONLY with a JSON array of objects, sorted by frequency (descending).
     Format:
     [
@@ -363,7 +434,7 @@ async def analyze_causal_frequencies(
       {{"cause_summary": "High pricing", "frequency": 3, "percentage": 30.0}}
     ]
     """
-    
+
     try:
         response_text = await call_llm(prompt, temperature=0.0)
         cleaned = response_text.strip()
@@ -371,17 +442,25 @@ async def analyze_causal_frequencies(
             cleaned = cleaned.split("```", 2)[-1] if cleaned.count("```") >= 2 else cleaned
             cleaned = cleaned.removeprefix("json").strip().strip("`").strip()
         frequencies = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        logger.warning("Frequency analysis returned non-JSON response", error=str(e))
-        return {"theme": effect_theme, "causes": [], "error": "LLM returned non-JSON response"}
     except Exception as e:
-        logger.error("Failed to analyze causal frequencies", error=str(e))
-        return {"theme": effect_theme, "causes": [], "error": str(e)}
+        logger.error("Failed to analyze causal frequencies via LLM, falling back to local Python grouping", error=str(e))
+        counts = {}
+        for c in all_causes:
+            summary = c[:60] + "..." if len(c) > 60 else c
+            counts[summary] = counts.get(summary, 0) + 1
         
+        frequencies = []
+        total = len(all_causes)
+        for summary, freq in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+            frequencies.append({
+                "cause_summary": summary,
+                "frequency": freq,
+                "percentage": round((freq / total) * 100, 1)
+            })
+
     return {
         "theme": effect_theme,
         "analyzed_effects_count": len(effect_memories),
         "total_causes_found": len(all_causes),
-        "causes": frequencies
+        "causes": frequencies,
     }
-

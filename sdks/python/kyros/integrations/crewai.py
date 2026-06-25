@@ -5,16 +5,15 @@ Requires: pip install crewai kyros-sdk
 
 from __future__ import annotations
 
-from kyros import Client
+from kyros import KyrosClient
 from kyros.exceptions import KyrosError
 
 try:
-    from crewai.tools import BaseTool
+    from crewai.tools import BaseTool  # type: ignore[import-not-found]
     from pydantic import BaseModel, Field
 except ImportError as e:
     raise ImportError(
-        "crewai is required for the CrewAI integration. "
-        "Install it with: pip install crewai"
+        "crewai is required for the CrewAI integration. Install it with: pip install crewai"
     ) from e
 
 
@@ -26,7 +25,7 @@ class _RememberInput(BaseModel):
     fact: str = Field(..., description="The fact or observation to store")
 
 
-class KyrosRecallTool(BaseTool):
+class KyrosRecallTool(BaseTool):  # type: ignore[misc]
     """CrewAI tool for recalling relevant memories from Kyros."""
 
     name: str = "Recall Memory"
@@ -36,7 +35,9 @@ class KyrosRecallTool(BaseTool):
     )
     args_schema: type[BaseModel] = _RecallInput
 
-    client: Client
+    client: KyrosClient | None = None
+    api_key: str | None = None
+    base_url: str | None = None
     agent_id: str
     k: int = 10
 
@@ -45,15 +46,16 @@ class KyrosRecallTool(BaseTool):
 
     def _run(self, query: str) -> str:
         try:
-            response = self.client.recall(self.agent_id, query, k=self.k)
+            client = self.client or KyrosClient(api_key=self.api_key, base_url=self.base_url)
+            response = client.recall(self.agent_id, query, k=self.k)
             if not response.results:
                 return "No relevant memories found."
             return "\n".join(f"- {r.content}" for r in response.results)
         except KyrosError as e:
-            return f"Memory recall failed: {e.message}"
+            return f"Memory recall failed: {e!s}"
 
 
-class KyrosRememberTool(BaseTool):
+class KyrosRememberTool(BaseTool):  # type: ignore[misc]
     """CrewAI tool for storing new memories in Kyros."""
 
     name: str = "Store Memory"
@@ -63,7 +65,9 @@ class KyrosRememberTool(BaseTool):
     )
     args_schema: type[BaseModel] = _RememberInput
 
-    client: Client
+    client: KyrosClient | None = None
+    api_key: str | None = None
+    base_url: str | None = None
     agent_id: str
 
     class Config:
@@ -71,25 +75,33 @@ class KyrosRememberTool(BaseTool):
 
     def _run(self, fact: str) -> str:
         try:
-            self.client.remember(self.agent_id, fact)
+            client = self.client or KyrosClient(api_key=self.api_key, base_url=self.base_url)
+            client.remember(self.agent_id, fact)
             return "Memory successfully stored."
         except KyrosError as e:
-            return f"Memory storage failed: {e.message}"
+            return f"Memory storage failed: {e!s}"
 
 
-def get_kyros_tools(client: Client, agent_id: str, k: int = 10) -> list[BaseTool]:
+def get_kyros_tools(
+    client: KyrosClient | None = None,
+    agent_id: str | None = None,
+    k: int = 10,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> list[BaseTool]:
     """Get a list of Kyros memory tools ready to pass to a CrewAI agent.
 
     Usage:
-        from kyros import Client
         from kyros.integrations.crewai import get_kyros_tools
 
-        client = Client(api_key="mk_live_...")
-        tools = get_kyros_tools(client, agent_id="my-crew-agent")
+        # Automatic configuration via environment variables:
+        tools = get_kyros_tools(agent_id="my-crew-agent")
 
         agent = Agent(role="...", tools=tools)
     """
+    if not agent_id:
+        raise ValueError("agent_id must be provided")
     return [
-        KyrosRecallTool(client=client, agent_id=agent_id, k=k),
-        KyrosRememberTool(client=client, agent_id=agent_id),
+        KyrosRecallTool(client=client, agent_id=agent_id, k=k, api_key=api_key, base_url=base_url),
+        KyrosRememberTool(client=client, agent_id=agent_id, api_key=api_key, base_url=base_url),
     ]
